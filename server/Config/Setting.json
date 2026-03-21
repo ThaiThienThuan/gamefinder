@@ -1,0 +1,29 @@
+{
+  "mongo": {
+    "uri": "mongodb://mongo:27017/gamematch"
+  },
+  "server": {
+    "port": 4000,
+    "nodeEnv": "development",
+    "logLevel": "dev"
+  },
+  "jwt": {
+    "secret": "your-jwt-secret-min-32-chars-change-in-prod",
+    "expiry": "7d"
+  },
+  "upload": {
+    "maxFileSizeMB": 50,
+    "uploadDir": "./uploads",
+    "mimeWhitelist": [
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "image/webp",
+      "video/mp4",
+      "video/webm"
+    ]
+  },
+  "cors": {
+    "allowedOrigin": "http://localhost:3000"
+  }
+}
