@@ -99,7 +99,11 @@ class RoomService {
       throw new Error('Room not found');
     }
 
-    if (room.ownerId._id.toString() !== ownerId.toString()) {
+    const ownerIdStr = room.ownerId?._id
+      ? room.ownerId._id.toString()
+      : room.ownerId.toString();
+
+    if (ownerIdStr !== ownerId.toString()) {
       throw new Error('Only room owner can kick members');
     }
 
@@ -132,7 +136,11 @@ class RoomService {
       throw new Error('Room not found');
     }
 
-    if (room.ownerId._id.toString() !== ownerId.toString()) {
+    const ownerIdStr = room.ownerId?._id
+      ? room.ownerId._id.toString()
+      : room.ownerId.toString();
+
+    if (ownerIdStr !== ownerId.toString()) {
       throw new Error('Only room owner can update room');
     }
 
@@ -146,7 +154,11 @@ class RoomService {
       throw new Error('Room not found');
     }
 
-    if (room.ownerId._id.toString() !== ownerId.toString()) {
+    const ownerIdStr = room.ownerId?._id
+      ? room.ownerId._id.toString()
+      : room.ownerId.toString();
+
+    if (ownerIdStr !== ownerId.toString()) {
       throw new Error('Only room owner can delete room');
     }
 

@@ -1,12 +1,29 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { RANKS } from "../constants";
 import GoldBtn from "./ui/GoldBtn";
 import RoomCard from "./RoomCard";
+import apiClient from "../lib/apiClient";
 
 function Lobby({mode,rooms,onCreateRoom,onViewRoom,onMatchFind,onBack,myRoom,onEnterRoom}){
   const [search,setSearch]=useState("");
   const [fRank,setFRank]=useState("");
   const [fStatus,setFStatus]=useState("");
+
+  useEffect(()=>{
+    if(!mode) return;
+    const fetchRooms=async()=>{
+      try{
+        const res=await apiClient.get('/api/rooms',{
+          params:{mode:mode.id?.toUpperCase()}
+        });
+        // Only update if parent hasn't set rooms via socket yet
+        // [SOCKET_PLACEHOLDER] - In Phase B, remove this polling and use socket events
+      }catch(err){
+        console.error('Failed to refresh rooms:',err);
+      }
+    };
+    fetchRooms();
+  },[mode]);
 
   const filtered=useMemo(()=>rooms.filter(r=>{
     if(search&&!r.name.toLowerCase().includes(search.toLowerCase())&&!r.id.includes(search)) return false;

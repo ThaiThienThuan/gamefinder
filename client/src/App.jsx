@@ -8,6 +8,8 @@ import RoomView from "./components/RoomView";
 import CreateRoomModal from "./components/CreateRoomModal";
 import MatchFindingModal from "./components/MatchFindingModal";
 import RoomDetailModal from "./components/RoomDetailModal";
+import apiClient from "./lib/apiClient";
+import { useAuth } from "./hooks/useAuth";
 
 export default function App(){
   const [page,setPage]=useState("modeSelect");
@@ -20,10 +22,22 @@ export default function App(){
   const [selRoom,setSelRoom]=useState(null);
   const [pendingJoin,setPendingJoin]=useState(null); // {roomId,requestId,snapshot}
   const [notif,setNotif]=useState(null);
+  const { user, loading } = useAuth();
 
   const toast=useCallback((text,type="info")=>{setNotif({text,type,id:Date.now()});setTimeout(()=>setNotif(null),3500);},[]);
 
-  const selectMode=m=>{setMode(m);setRooms(Array.from({length:randInt(10,18)},()=>makeRoom(m)));setPage("lobby");};
+  const selectMode=async(m)=>{
+    setMode(m);
+    setPage("lobby");
+    try{
+      const res=await apiClient.get('/api/rooms',{params:{mode:m.id?.toUpperCase()}});
+      setRooms(res.data.data||[]);
+    }catch(err){
+      console.error('Failed to fetch rooms:',err);
+      setRooms([]);
+      toast('⚠️ Không thể tải danh sách phòng','error');
+    }
+  };
 
   // Real-time simulation: rooms appear/change/disappear while in lobby
   useEffect(()=>{
@@ -89,7 +103,19 @@ export default function App(){
   },[pendingJoin]);
 
   // --- Room handlers ---
-  const createRoom=room=>{setMyRoom(room);setIsOwner(true);setRooms(p=>[room,...p]);setPage("inRoom");toast("🏠 Đã tạo phòng thành công!");};
+  const createRoom=async(roomData)=>{
+    try{
+      const res=await apiClient.post('/api/rooms',roomData);
+      const room=res.data.data;
+      setMyRoom(room);
+      setIsOwner(true);
+      setRooms(p=>[room,...p]);
+      setPage("inRoom");
+      toast("🏠 Đã tạo phòng thành công!");
+    }catch(err){
+      toast(`❌ ${err.response?.data?.message||'Tạo phòng thất bại'}`,'error');
+    }
+  };
 
   const joinRoom=id=>{
     const r=rooms.find(r=>r.id===id);
@@ -156,6 +182,23 @@ export default function App(){
       toast("🎮 Đã ghép trận thành công! Đội đủ người.");
     },randInt(4000,8000));
   };
+
+  if(loading){
+    return(
+      <div style={{
+        minHeight:'100vh',
+        display:'flex',
+        alignItems:'center',
+        justifyContent:'center',
+        background:'linear-gradient(135deg,#010a13 0%,#0a1628 50%,#091428 100%)',
+        color:'#c8aa6e',
+        fontFamily:"'Playfair Display', serif",
+        fontSize:18
+      }}>
+        ⚔️ Đang kết nối...
+      </div>
+    );
+  }
 
   return(
     <div style={{fontFamily:"'Inter',sans-serif",background:"linear-gradient(135deg,#010a13 0%,#0a1628 50%,#091428 100%)",color:"#a09b8c",minHeight:"100vh"}}>

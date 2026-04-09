@@ -27,13 +27,6 @@ class RoomController {
 
   async createRoom(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { name, mode, slots } = req.body;
 
       if (!name || !mode || !slots) {
@@ -80,13 +73,6 @@ class RoomController {
 
   async updateRoom(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { id } = req.params;
       const room = await this.roomService.updateRoom(id, req.user.id, req.body);
 
@@ -104,13 +90,6 @@ class RoomController {
 
   async deleteRoom(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { id } = req.params;
       await this.roomService.deleteRoom(id, req.user.id);
 
@@ -128,13 +107,6 @@ class RoomController {
 
   async joinRoom(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { id } = req.params;
       const result = await this.roomService.joinRoom(id, req.user.id);
 
@@ -152,13 +124,6 @@ class RoomController {
 
   async leaveRoom(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { id } = req.params;
       const result = await this.roomService.leaveRoom(id, req.user.id);
 
@@ -176,13 +141,6 @@ class RoomController {
 
   async kickMember(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { id } = req.params;
       const { targetUserId } = req.body;
 

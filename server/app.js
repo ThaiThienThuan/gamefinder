@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const mongoose = require('mongoose');
 const path = require('path');
 const setting = require('./Config/Setting.json');
 const router = require('./apps/controllers/index');
@@ -21,9 +22,14 @@ app.use('/api', router);
 
 // Health check (root)
 app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    db: 'connected'
+  const dbState = mongoose.connection.readyState;
+  // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+  const dbStatus = dbState === 1 ? 'connected' : 'disconnected';
+  const httpStatus = dbState === 1 ? 200 : 503;
+
+  res.status(httpStatus).json({
+    status: dbState === 1 ? 'ok' : 'degraded',
+    db: dbStatus
   });
 });
 

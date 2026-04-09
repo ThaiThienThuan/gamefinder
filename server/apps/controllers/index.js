@@ -1,45 +1,14 @@
 const express = require('express');
-const { authMiddleware, requireAuth } = require('../../Util/VerifyToken');
-const multer = require('multer');
-const path = require('path');
+const { authMiddleware, requireAuth, requireRegistered } = require('../../Util/VerifyToken');
 
 const AuthController = require('./api/authcontroller');
 const RoomController = require('./roomcontroller');
 const MessageController = require('./messagecontroller');
 const UploadController = require('./uploadcontroller');
+const { upload } = require('./uploadcontroller');
 const MatchmakingController = require('./matchmakingcontroller');
 
 const router = express.Router();
-
-// Multer configuration
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, path.join(__dirname, '../../uploads'));
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}_${file.originalname}`);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowedMimes = [
-      'image/jpeg',
-      'image/png',
-      'image/gif',
-      'image/webp',
-      'video/mp4',
-      'video/webm'
-    ];
-    if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`File type ${file.mimetype} not allowed`));
-    }
-  }
-});
 
 // Initialize controllers
 const authController = new AuthController();
@@ -57,13 +26,13 @@ router.post('/auth/convert', authMiddleware, (req, res) => authController.conver
 
 // Room routes
 router.get('/rooms', (req, res) => roomController.listRooms(req, res));
-router.post('/rooms', requireAuth, (req, res) => roomController.createRoom(req, res));
+router.post('/rooms', requireRegistered, (req, res) => roomController.createRoom(req, res));
 router.get('/rooms/:id', (req, res) => roomController.getRoomDetail(req, res));
-router.patch('/rooms/:id', requireAuth, (req, res) => roomController.updateRoom(req, res));
-router.delete('/rooms/:id', requireAuth, (req, res) => roomController.deleteRoom(req, res));
-router.post('/rooms/:id/join', requireAuth, (req, res) => roomController.joinRoom(req, res));
-router.post('/rooms/:id/leave', requireAuth, (req, res) => roomController.leaveRoom(req, res));
-router.post('/rooms/:id/kick', requireAuth, (req, res) => roomController.kickMember(req, res));
+router.patch('/rooms/:id', requireRegistered, (req, res) => roomController.updateRoom(req, res));
+router.delete('/rooms/:id', requireRegistered, (req, res) => roomController.deleteRoom(req, res));
+router.post('/rooms/:id/join', requireRegistered, (req, res) => roomController.joinRoom(req, res));
+router.post('/rooms/:id/leave', requireRegistered, (req, res) => roomController.leaveRoom(req, res));
+router.post('/rooms/:id/kick', requireRegistered, (req, res) => roomController.kickMember(req, res));
 router.get('/rooms/:id/members', (req, res) => roomController.getMembers(req, res));
 
 // Message routes

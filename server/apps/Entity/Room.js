@@ -30,14 +30,6 @@ const roomSchema = new mongoose.Schema(
       type: String,
       enum: ['RECRUITING', 'FULL', 'PLAYING', 'FINISHED'],
       default: 'RECRUITING'
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now
-    },
-    updatedAt: {
-      type: Date,
-      default: Date.now
     }
   },
   { timestamps: true }
