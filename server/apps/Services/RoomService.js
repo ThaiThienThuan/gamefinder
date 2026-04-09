@@ -3,10 +3,18 @@ const RoomMemberRepository = require('../Repository/RoomMemberRepository');
 const UserRepository = require('../Repository/UserRepository');
 
 class RoomService {
-  constructor() {
+  constructor(io = null) {
+    this.io = io;
     this.roomRepository = new RoomRepository();
     this.roomMemberRepository = new RoomMemberRepository();
     this.userRepository = new UserRepository();
+  }
+
+  // Safe emit helper — works whether io is present or not
+  emit(channel, event, payload) {
+    if (this.io) {
+      this.io.to(channel).emit(event, payload);
+    }
   }
 
   async createRoom(ownerId, roomData) {
@@ -26,6 +34,10 @@ class RoomService {
       roomId: room._id,
       userId: ownerId
     });
+
+    // Emit to all clients in the mode lobby channel
+    this.emit(`lobby:${room.mode}`, 'room:created', room);
+    // [REDIS_PLACEHOLDER] - In Phase C, this goes through Redis adapter automatically
 
     return room;
   }
@@ -65,7 +77,10 @@ class RoomService {
       await this.roomRepository.setStatus(roomId, 'FULL');
     }
 
-    // [REDIS_PLACEHOLDER] - Emit room:member-joined event via Socket.io Redis adapter in Phase B/C
+    const member = await this.roomMemberRepository.findByRoomAndUser(roomId, userId);
+    this.emit(`room:${roomId}`, 'room:member-joined', { roomId, member });
+    this.emit(`lobby:${updatedRoom.mode}`, 'room:updated', updatedRoom);
+    // [REDIS_PLACEHOLDER] - In Phase C, Redis adapter ensures all server instances emit
 
     return { success: true, room: updatedRoom };
   }
@@ -88,7 +103,8 @@ class RoomService {
       await this.roomRepository.setStatus(roomId, 'RECRUITING');
     }
 
-    // [REDIS_PLACEHOLDER] - Emit room:member-left event via Socket.io Redis adapter in Phase B/C
+    this.emit(`room:${roomId}`, 'room:member-left', { roomId, userId });
+    this.emit(`lobby:${updatedRoom.mode}`, 'room:updated', updatedRoom);
 
     return { success: true, room: updatedRoom };
   }
@@ -145,6 +161,7 @@ class RoomService {
     }
 
     const updatedRoom = await this.roomRepository.updateById(roomId, updateData);
+    this.emit(`lobby:${updatedRoom.mode}`, 'room:updated', updatedRoom);
     return updatedRoom;
   }
 
@@ -165,7 +182,7 @@ class RoomService {
     await this.roomMemberRepository.deleteByRoom(roomId);
     await this.roomRepository.deleteById(roomId);
 
-    // [REDIS_PLACEHOLDER] - Emit room:deleted event via Socket.io Redis adapter in Phase B/C
+    this.emit(`lobby:${room.mode}`, 'room:deleted', { roomId });
 
     return { success: true };
   }

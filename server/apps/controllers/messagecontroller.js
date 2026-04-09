@@ -1,8 +1,8 @@
 const MessageService = require('../Services/MessageService');
+const { getIO } = require('../../socket/index');
 
 class MessageController {
   constructor() {
-    this.messageService = new MessageService();
   }
 
   async getMessages(req, res) {
@@ -10,7 +10,8 @@ class MessageController {
       const { roomId } = req.params;
       const { limit = 50, skip = 0 } = req.query;
 
-      const result = await this.messageService.getMessages(
+      const service = new MessageService();
+      const result = await service.getMessages(
         roomId,
         parseInt(limit),
         parseInt(skip)
@@ -46,7 +47,9 @@ class MessageController {
         });
       }
 
-      const message = await this.messageService.sendMessage(
+      const io = (() => { try { return getIO(); } catch { return null; } })();
+      const service = new MessageService(io);
+      const message = await service.sendMessage(
         roomId,
         req.user.id,
         text,
@@ -75,7 +78,8 @@ class MessageController {
       }
 
       const { messageId } = req.params;
-      const result = await this.messageService.deleteMessage(messageId, req.user.id);
+      const service = new MessageService();
+      const result = await service.deleteMessage(messageId, req.user.id);
 
       res.status(200).json({
         success: true,

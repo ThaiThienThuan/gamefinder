@@ -4,11 +4,19 @@ const RoomRepository = require('../Repository/RoomRepository');
 const UserRepository = require('../Repository/UserRepository');
 
 class MessageService {
-  constructor() {
+  constructor(io = null) {
+    this.io = io;
     this.messageRepository = new MessageRepository();
     this.roomMemberRepository = new RoomMemberRepository();
     this.roomRepository = new RoomRepository();
     this.userRepository = new UserRepository();
+  }
+
+  // Safe emit helper
+  emit(channel, event, payload) {
+    if (this.io) {
+      this.io.to(channel).emit(event, payload);
+    }
   }
 
   async sendMessage(roomId, userId, text, attachmentIds = []) {
@@ -42,11 +50,10 @@ class MessageService {
       attachments: attachmentIds
     });
 
-    const populatedMessage = await this.messageRepository.findById(message._id);
-
-    // [REDIS_PLACEHOLDER] - Broadcast message via Socket.io Redis adapter in Phase B/C
-
-    return populatedMessage;
+    const populated = await this.messageRepository.findByIdWithUser(message._id);
+    this.emit(`room:${roomId}`, 'chat:message', populated);
+    // [REDIS_PLACEHOLDER] - In Phase C, emit goes through Redis pub/sub
+    return populated;
   }
 
   async getMessages(roomId, limit = 50, skip = 0) {
