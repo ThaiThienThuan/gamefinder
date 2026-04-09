@@ -38,28 +38,11 @@ class RoomController {
 
       const io = (() => { try { return getIO(); } catch { return null; } })();
       const service = new RoomService(io);
-      const room = await service.createRoom(req.user.id, {
-        name,
-        mode,
-        slots
-      });
-      }
+      const room = await service.createRoom(req.user.id, { name, mode, slots });
 
-      const room = await this.roomService.createRoom(req.user.id, {
-        name,
-        mode,
-        slots
-      });
-
-      res.status(201).json({
-        success: true,
-        data: room
-      });
+      res.status(201).json({ success: true, data: room });
     } catch (error) {
-      res.status(400).json({
-        success: false,
-        message: error.message
-      });
+      res.status(400).json({ success: false, message: error.message });
     }
   }
 

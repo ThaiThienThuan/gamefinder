@@ -10,6 +10,7 @@ import MatchFindingModal from "./components/MatchFindingModal";
 import RoomDetailModal from "./components/RoomDetailModal";
 import apiClient from "./lib/apiClient";
 import { useAuth } from "./hooks/useAuth";
+import { useSocket } from "./hooks/useSocket";
 
 export default function App(){
   const [page,setPage]=useState("modeSelect");
@@ -23,8 +24,17 @@ export default function App(){
   const [pendingJoin,setPendingJoin]=useState(null); // {roomId,requestId,snapshot}
   const [notif,setNotif]=useState(null);
   const { user, loading } = useAuth();
+  const { connect, disconnect, on, joinLobby, leaveLobby, joinRoom: socketJoinRoom, emit } = useSocket();
 
   const toast=useCallback((text,type="info")=>{setNotif({text,type,id:Date.now()});setTimeout(()=>setNotif(null),3500);},[]);
+
+  useEffect(()=>{
+    if(!user||loading) return;
+    const token=localStorage.getItem('token');
+    const guestId=localStorage.getItem('guestId');
+    connect(token,guestId);
+    return ()=>disconnect();
+  },[user,loading,connect,disconnect]);
 
   const selectMode=async(m)=>{
     setMode(m);
@@ -39,12 +49,28 @@ export default function App(){
     }
   };
 
-  // [SOCKET_PLACEHOLDER] - Mock simulation disabled.
-  // Real-time room updates will come from Socket.io events in Phase B.
-  // Do NOT re-enable makeRoom() here.
+  // Socket.io lobby listeners: listen for real-time room updates
   useEffect(()=>{
     if(page!=="lobby"||!mode) return;
-  },[page,mode,myRoom]);
+    joinLobby(mode.id);
+
+    const offCreated=on('room:created',(room)=>{
+      setRooms(prev=>[room,...prev.filter(r=>r._id!==room._id)]);
+    });
+    const offUpdated=on('room:updated',(room)=>{
+      setRooms(prev=>prev.map(r=>r._id===room._id?room:r));
+    });
+    const offDeleted=on('room:deleted',({roomId})=>{
+      setRooms(prev=>prev.filter(r=>r._id!==roomId));
+    });
+
+    return()=>{
+      leaveLobby();
+      offCreated();
+      offUpdated();
+      offDeleted();
+    };
+  },[page,mode,joinLobby,leaveLobby,on]);
 
   // Simulate incoming join requests for room owner
   useEffect(()=>{
@@ -96,6 +122,7 @@ export default function App(){
       setIsOwner(true);
       setRooms(p=>[room,...p]);
       setPage("inRoom");
+      socketJoinRoom(room._id);
       toast("🏠 Đã tạo phòng thành công!");
     }catch(err){
       toast(`❌ ${err.response?.data?.message||'Tạo phòng thất bại'}`,'error');
@@ -146,6 +173,7 @@ export default function App(){
   };
 
   const leave=()=>{
+    if(myRoom?._id) emit('room:leave',{roomId:myRoom._id});
     if(isOwner) setRooms(p=>p.filter(r=>r.id!==myRoom?.id));
     setMyRoom(null);setIsOwner(false);setPage("lobby");toast("👋 Đã rời phòng.");
   };

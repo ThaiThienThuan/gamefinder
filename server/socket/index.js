@@ -12,7 +12,9 @@ let io;
 function initSocket(server) {
   io = new Server(server, {
     cors: {
-      origin: setting.cors.allowedOrigin,
+      origin: Array.isArray(setting.cors.allowedOrigin)
+        ? setting.cors.allowedOrigin
+        : [setting.cors.allowedOrigin, 'http://localhost:5173', 'http://localhost:3000'],
       methods: ['GET', 'POST'],
       credentials: true
     }
