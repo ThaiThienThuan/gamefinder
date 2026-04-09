@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { RANKS, POSITIONS, PLAY_STYLES, NAMES } from "./constants";
-import { pick, randInt, uid, makeRoom } from "./utils/helpers";
+import { pick, randInt, uid } from "./utils/helpers";
 import GlobalStyles from "./components/ui/GlobalStyles";
 import ModeSelection from "./components/ModeSelection";
 import Lobby from "./components/Lobby";
@@ -39,26 +39,11 @@ export default function App(){
     }
   };
 
-  // Real-time simulation: rooms appear/change/disappear while in lobby
+  // [SOCKET_PLACEHOLDER] - Mock simulation disabled.
+  // Real-time room updates will come from Socket.io events in Phase B.
+  // Do NOT re-enable makeRoom() here.
   useEffect(()=>{
     if(page!=="lobby"||!mode) return;
-    const iv=setInterval(()=>{
-      setRooms(prev=>{
-        let u=[...prev];
-        if(Math.random()>.55) u.push(makeRoom(mode));
-        if(Math.random()>.65&&u.length>4){
-          const i=randInt(0,u.length-1);
-          if(u[i].id!==myRoom?.id) u[i]={...u[i],status:pick(["looking","waiting","inactive"])};
-        }
-        if(Math.random()>.75&&u.length>4){
-          const i=randInt(0,u.length-1);
-          if(u[i].members.length<u[i].maxPlayers&&u[i].id!==myRoom?.id)
-            u[i]={...u[i],members:[...u[i].members,{id:uid(),name:pick(NAMES),rank:pick(RANKS),position:pick(POSITIONS),style:pick(PLAY_STYLES)}]};
-        }
-        return u.filter(r=>!(r.members.length>=r.maxPlayers&&r.id!==myRoom?.id&&Math.random()>.85));
-      });
-    },4500);
-    return()=>clearInterval(iv);
   },[page,mode,myRoom]);
 
   // Simulate incoming join requests for room owner

@@ -51,14 +51,6 @@ router.post('/matchmaking/stop', requireAuth, (req, res) => matchmakingControlle
 router.get('/matchmaking/status', requireAuth, (req, res) => matchmakingController.getStatus(req, res));
 router.get('/matchmaking/status-all', (req, res) => matchmakingController.getAllQueueStatus(req, res));
 
-// Health check
-router.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    db: 'connected'
-  });
-});
-
 // [MEDIASOUP_PLACEHOLDER] - TURN credentials endpoint (Phase D)
 // router.get('/turn-credentials', requireAuth, (req, res) => {...});
 
