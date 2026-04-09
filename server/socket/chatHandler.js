@@ -1,4 +1,5 @@
 const MessageService = require('../apps/Services/MessageService');
+const { checkRateLimit } = require('../redis/redisClient');
 
 function registerChatHandlers(io, socket) {
 
@@ -14,6 +15,12 @@ function registerChatHandlers(io, socket) {
       const userId = socket.user.id;
       if (!userId) {
         return socket.emit('error', { message: 'Registered account required to send messages' });
+      }
+
+      // Rate limit: 1 message per second per user
+      const allowed = await checkRateLimit(userId, 1);
+      if (!allowed) {
+        return socket.emit('error', { message: 'Message rate limit exceeded. Max 1 per second.' });
       }
 
       // MessageService saves to DB and emits to room channel

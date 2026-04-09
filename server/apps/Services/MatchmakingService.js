@@ -1,55 +1,47 @@
 const RoomRepository = require('../Repository/RoomRepository');
 const RoomService = require('./RoomService');
 const UserRepository = require('../Repository/UserRepository');
+const { addToQueue, removeFromQueue, getQueueByMode, getQueueSize } = require('../../redis/redisClient');
 
 class MatchmakingService {
   constructor(io = null) {
     this.io = io;
-    this.queue = MatchmakingService.queue; // shared in-memory queue
     this.roomService = new RoomService(io);
     this.userRepository = new UserRepository();
   }
 
-  // Static shared queue (in-memory for Phase B)
-  // [REDIS_PLACEHOLDER] - In Phase C, replace this.queue with Redis sorted set
-  static queue = new Map(); // key: userId, value: { mode, rank, socketId, timestamp }
-
   async enterQueue(userId, mode, rank, socketId) {
-    if (this.queue.has(userId)) {
-      throw new Error('User already in queue');
-    }
-
-    // Add to static queue Map
-    MatchmakingService.queue.set(userId, { mode, rank, socketId, timestamp: Date.now() });
+    // Add to Redis sorted set (ZADD with timestamp)
+    await addToQueue(userId, mode, rank, socketId);
 
     // Get position and total in queue for this mode
-    const modeUsers = Array.from(MatchmakingService.queue.entries())
-      .filter(([_, entry]) => entry.mode === mode);
-    const position = modeUsers.length;
-    const total = modeUsers.length;
+    const queueSize = await getQueueSize(mode);
+    const position = queueSize;
 
     // Check for match: find ≥5 players with same mode and close rank range
     await this.checkForMatch(mode);
 
-    return { position, total };
+    return { position, total: queueSize };
   }
 
   async leaveQueue(userId) {
-    MatchmakingService.queue.delete(userId);
+    // Remove from all mode queues in Redis
+    const modes = ['RANKED', 'NORMAL', 'ARAM', 'TFT'];
+    for (const mode of modes) {
+      await removeFromQueue(userId, mode);
+    }
     return { success: true };
   }
 
   async checkForMatch(mode) {
-    const modeUsers = Array.from(MatchmakingService.queue.entries())
-      .filter(([_, entry]) => entry.mode === mode)
-      .sort((a, b) => a[1].timestamp - b[1].timestamp);
+    const modeUsers = await getQueueByMode(mode);
 
     if (modeUsers.length < 5) {
       return null;
     }
 
     const potentialMatch = modeUsers.slice(0, 5);
-    const firstEntry = potentialMatch[0][1];
+    const firstEntry = potentialMatch[0];
 
     const rankRanges = {
       IRON: ['IRON', 'BRONZE'],
@@ -64,14 +56,14 @@ class MatchmakingService {
     };
 
     const acceptableRanks = rankRanges[firstEntry.rank] || [];
-    const allCompatibleRank = potentialMatch.every(([_, entry]) => acceptableRanks.includes(entry.rank));
+    const allCompatibleRank = potentialMatch.every((entry) => acceptableRanks.includes(entry.rank));
 
     if (!allCompatibleRank) {
       return null;
     }
 
     // Create room and add matched users
-    const matchedUserIds = potentialMatch.map(([userId, _]) => userId);
+    const matchedUserIds = potentialMatch.map((entry) => entry.userId);
     const room = await this.roomService.createRoom(matchedUserIds[0], {
       name: `Auto Match - ${mode}`,
       mode,
@@ -83,58 +75,42 @@ class MatchmakingService {
     }
 
     // For each matched user, emit finding:match-found to their socketId
-    matchedUserIds.forEach(userId => {
-      const entry = MatchmakingService.queue.get(userId);
-      if (entry && this.io) {
+    for (const entry of potentialMatch) {
+      if (entry.socketId && this.io) {
         this.io.to(entry.socketId).emit('finding:match-found', { room });
       }
-      MatchmakingService.queue.delete(userId);
-    });
+      // Remove from Redis queue
+      await removeFromQueue(entry.userId, mode);
+    }
 
     return { roomId: room._id, players: matchedUserIds, mode };
   }
 
   async getQueueStatus(userId) {
-    if (!MatchmakingService.queue.has(userId)) {
-      return { inQueue: false, position: -1 };
+    const modes = ['RANKED', 'NORMAL', 'ARAM', 'TFT'];
+    for (const mode of modes) {
+      const modeUsers = await getQueueByMode(mode);
+      const userInQueue = modeUsers.find(entry => entry.userId === userId);
+      if (userInQueue) {
+        const position = modeUsers.findIndex(entry => entry.userId === userId) + 1;
+        const waitTime = Math.floor((Date.now() - userInQueue.timestamp) / 1000);
+        return { inQueue: true, position, waitTime, mode, queueSize: modeUsers.length };
+      }
     }
-
-    const userEntry = MatchmakingService.queue.get(userId);
-    const modeUsers = Array.from(MatchmakingService.queue.entries())
-      .filter(([_, entry]) => entry.mode === userEntry.mode)
-      .sort((a, b) => a[1].timestamp - b[1].timestamp);
-
-    const position = modeUsers.findIndex(([id, _]) => id === userId) + 1;
-    const waitTime = Math.floor((Date.now() - userEntry.timestamp) / 1000);
-
-    return {
-      inQueue: true,
-      position,
-      waitTime,
-      mode: userEntry.mode,
-      queueSize: modeUsers.length
-    };
+    return { inQueue: false, position: -1 };
   }
 
   async getAllQueueStatus() {
-    const queues = {
-      RANKED: 0,
-      NORMAL: 0,
-      ARAM: 0,
-      TFT: 0
-    };
+    const modes = ['RANKED', 'NORMAL', 'ARAM', 'TFT'];
+    const queues = {};
 
-    MatchmakingService.queue.forEach(entry => {
-      if (queues.hasOwnProperty(entry.mode)) {
-        queues[entry.mode]++;
-      }
-    });
+    for (const mode of modes) {
+      const size = await getQueueSize(mode);
+      queues[mode] = size;
+    }
 
-    // [REDIS_PLACEHOLDER] - In Phase C, aggregate queue stats from Redis
-    return {
-      queueSize: MatchmakingService.queue.size,
-      queues
-    };
+    const total = Object.values(queues).reduce((sum, val) => sum + val, 0);
+    return { queueSize: total, queues };
   }
 }
 

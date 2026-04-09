@@ -1,6 +1,8 @@
 const { Server } = require('socket.io');
+const { createAdapter } = require('@socket.io/redis-adapter');
 const setting = require('../Config/Setting.json');
 const { authMiddleware } = require('../Util/VerifyToken');
+const { redisPub, redisSub, removePresence } = require('../redis/redisClient');
 
 const registerRoomHandlers = require('./roomHandler');
 const registerChatHandlers = require('./chatHandler');
@@ -17,9 +19,8 @@ function initSocket(server) {
         : [setting.cors.allowedOrigin, 'http://localhost:5173', 'http://localhost:3000'],
       methods: ['GET', 'POST'],
       credentials: true
-    }
-    // [REDIS_PLACEHOLDER] - In Phase C, add adapter here:
-    // adapter: createAdapter(pubClient, subClient)
+    },
+    adapter: createAdapter(redisPub, redisSub)
   });
 
   // Auth middleware for socket connections
@@ -50,9 +51,11 @@ function initSocket(server) {
     registerPresenceHandlers(io, socket);
     registerMatchmakingHandlers(io, socket);
 
-    socket.on('disconnect', (reason) => {
+    socket.on('disconnect', async (reason) => {
       console.log(`✗ Socket disconnected: ${socket.id} reason:${reason}`);
-      // [REDIS_PLACEHOLDER] - In Phase C, remove user from Redis presence map here
+      if (socket.user?.id) {
+        await removePresence(socket.user.id);
+      }
     });
   });
 
