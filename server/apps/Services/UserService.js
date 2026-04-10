@@ -73,11 +73,27 @@ class UserService {
   }
 
   async createGuest() {
-    const guestId = generateGuestId();
-    const user = await this.userRepository.create({
-      username: `Guest_${guestId.slice(0, 8)}`,
-      guestId
-    });
+    let user;
+    let guestId;
+    let retries = 3;
+
+    while (retries > 0) {
+      try {
+        guestId = generateGuestId();
+        user = await this.userRepository.create({
+          username: `Guest_${guestId.slice(0, 8)}`,
+          guestId
+        });
+        break; // Success
+      } catch (err) {
+        if (err.code === 11000 && retries > 1) {
+          // Duplicate key error — retry with new guestId
+          retries--;
+          continue;
+        }
+        throw err;
+      }
+    }
 
     return {
       user: {

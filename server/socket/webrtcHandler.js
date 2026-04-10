@@ -11,7 +11,16 @@ const { createConsumer } = require('../mediasoup/consumer');
 // Track bitrate adaptation intervals per room
 const adaptationIntervals = new Map();
 
+// Track socket-to-resources: socketId → { roomId, transportIds: [], producerIds: [] }
+const socketResources = new Map();
+
 function registerWebRTCHandlers(io, socket) {
+  // Track this socket's resources for cleanup on disconnect
+  if (!socketResources.has(socket.id)) {
+    socketResources.set(socket.id, { roomId: null, transportIds: new Set(), producerIds: new Set() });
+  }
+
+  const socketResourcesData = socketResources.get(socket.id);
 
   // Client requests to join mediasoup room
   socket.on('webrtc:join-room', async ({ roomId } = {}) => {
@@ -127,6 +136,16 @@ function registerWebRTCHandlers(io, socket) {
     } catch (err) {
       socket.emit('error', { message: `webrtc:resume-consumer failed: ${err.message}` });
     }
+  });
+
+  // Clean up WebRTC resources on disconnect
+  socket.on('disconnect', async () => {
+    const resources = socketResources.get(socket.id);
+    if (resources && resources.roomId) {
+      console.log(`WebRTC: socket ${socket.id} disconnected from room ${resources.roomId}`);
+      // TODO: Implement per-socket resource cleanup (close specific transports/producers/consumers)
+    }
+    socketResources.delete(socket.id);
   });
 }
 

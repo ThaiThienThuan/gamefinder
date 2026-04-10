@@ -180,20 +180,14 @@ export default function App(){
 
   const queueMatch=profile=>{
     toast("⏳ Đang trong hàng chờ...");
-    setTimeout(()=>{
-      const nr={
-        id:uid(),name:`Auto Match ${uid().substring(0,4).toUpperCase()}`,
-        mode:mode.id,maxPlayers:mode.players,
-        members:[{id:"self",name:"Bạn",...profile},
-          ...Array.from({length:mode.players-1},()=>({id:uid(),name:pick(NAMES),rank:profile.rank,position:pick(POSITIONS),style:pick(PLAY_STYLES)}))
-        ],
-        avgRank:profile.rank,status:"waiting",voiceChat:true,
-        rankRange:[profile.rank,profile.rank],positionsNeeded:[],
-        stylePreference:profile.style,createdAt:Date.now(),requests:[],note:"",
-      };
-      setMyRoom(nr);setIsOwner(false);setRooms(p=>[nr,...p]);setPage("inRoom");
-      toast("🎮 Đã ghép trận thành công! Đội đủ người.");
-    },randInt(4000,8000));
+    emit('finding:start', { mode: mode.id, rank: profile.rank });
+    on('finding:match-found', ({ room }) => {
+      setMyRoom(room);
+      setIsOwner(false);
+      setPage("inRoom");
+      socketJoinRoom(room._id);
+      toast("🎮 Đã ghép trận thành công!");
+    });
   };
 
   if(loading){

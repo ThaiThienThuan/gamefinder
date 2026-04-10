@@ -52,7 +52,11 @@ export function useSocket() {
   }, []);
 
   const on = useCallback((event, handler) => {
-    socketRef.current?.on(event, handler);
+    if (!socketRef.current) {
+      console.warn(`useSocket: on('${event}') called before connect()`);
+      return () => {};
+    }
+    socketRef.current.on(event, handler);
     return () => socketRef.current?.off(event, handler); // returns cleanup fn
   }, []);
 

@@ -34,29 +34,47 @@ redisSub.on('error', (err) => console.error('✗ Redis sub error:', err.message)
 redis.on('connect', () => console.log('✓ Redis main client connected'));
 redis.on('error', (err) => console.error('✗ Redis error:', err.message));
 
-// Queue operations (sorted set: ZADD for FIFO)
+// Queue operations (sorted set: ZADD for FIFO, hash for metadata)
 async function addToQueue(userId, mode, rank, socketId) {
-  const member = JSON.stringify({ mode, rank, socketId });
   const score = Date.now(); // timestamp for FIFO ordering
-  await redis.zadd(`queue:${mode}`, score, `${userId}|${member}`);
+  const queueKey = `queue:${mode}`;
+  const userKey = `user:${userId}`;
+
+  // Add userId to sorted set (FIFO ordering by timestamp)
+  await redis.zadd(queueKey, score, userId);
+  
+  // Store user metadata in hash (fast lookup, no string parsing)
+  await redis.hset(userKey, 'mode', mode, 'rank', rank, 'socketId', socketId, 'timestamp', score);
+  await redis.expire(userKey, 600); // 10 min TTL
 }
 
 async function removeFromQueue(userId, mode) {
-  const pattern = `${userId}|*`;
-  const members = await redis.zrange(`queue:${mode}`, 0, -1);
-  for (const member of members) {
-    if (member.startsWith(userId)) {
-      await redis.zrem(`queue:${mode}`, member);
-    }
-  }
+  const queueKey = `queue:${mode}`;
+  const userKey = `user:${userId}`;
+
+  await redis.zrem(queueKey, userId);
+  await redis.del(userKey);
 }
 
 async function getQueueByMode(mode) {
-  const members = await redis.zrange(`queue:${mode}`, 0, -1);
-  return members.map(m => {
-    const [userId, data] = m.split('|');
-    return { userId, ...JSON.parse(data) };
-  });
+  const queueKey = `queue:${mode}`;
+  const userIds = await redis.zrange(queueKey, 0, -1);
+  
+  const result = [];
+  for (const userId of userIds) {
+    const userKey = `user:${userId}`;
+    const data = await redis.hgetall(userKey);
+    if (data && data.rank) {
+      result.push({
+        userId,
+        mode: data.mode,
+        rank: data.rank,
+        socketId: data.socketId,
+        timestamp: parseInt(data.timestamp)
+      });
+    }
+  }
+  return result;
 }
 
 async function getQueueSize(mode) {

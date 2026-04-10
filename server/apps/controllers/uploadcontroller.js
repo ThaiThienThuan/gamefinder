@@ -35,13 +35,6 @@ class UploadController {
 
   async uploadFile(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       if (!req.file) {
         return res.status(400).json({
           success: false,
@@ -79,13 +72,6 @@ class UploadController {
 
   async deleteAttachment(req, res) {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authorization required'
-        });
-      }
-
       const { attachmentId } = req.params;
       const result = await this.uploadService.deleteAttachment(attachmentId, req.user.id);
 

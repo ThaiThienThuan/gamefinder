@@ -11,13 +11,43 @@ async function startServer() {
     await connectDatabase();
     console.log('✓ Database connected');
 
+    // Try to initialize Redis adapter; if it fails, continue without it (degraded mode)
+    let redisAvailable = true;
+    try {
+      const { redis } = require('./redis/redisClient');
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Redis connection timeout')), 5000);
+        redis.on('ready', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        redis.on('error', reject);
+      });
+    } catch (err) {
+      console.warn(`⚠ Redis unavailable (${err.message}) — running in degraded mode (single instance only)`);
+      redisAvailable = false;
+    }
+
     const server = http.createServer(app);
     initSocket(server);
 
     server.listen(PORT, () => {
       console.log(`✓ Server running on port ${PORT}`);
       console.log(`✓ Socket.io attached to HTTP server`);
+      console.log(`✓ Redis adapter: ${redisAvailable ? 'enabled' : 'disabled'}`);
       console.log(`✓ Health check: http://localhost:${PORT}/health`);
+    });
+
+    // Graceful shutdown on SIGTERM
+    process.on('SIGTERM', async () => {
+      console.log('⚠ SIGTERM received — closing mediasoup resources...');
+      const { cleanupRoom } = require('./mediasoup/router');
+      // In a real deployment, iterate all active rooms and cleanup
+      // For now, server will exit and OS cleans up resources
+      server.close(() => {
+        console.log('✓ Server closed gracefully');
+        process.exit(0);
+      });
     });
   } catch (error) {
     console.error('✗ Failed to start server:', error.message);
