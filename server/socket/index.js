@@ -8,6 +8,7 @@ const registerRoomHandlers = require('./roomHandler');
 const registerChatHandlers = require('./chatHandler');
 const registerPresenceHandlers = require('./presenceHandler');
 const registerMatchmakingHandlers = require('./matchmakingHandler');
+const registerWebRTCHandlers = require('./webrtcHandler');
 
 let io;
 
@@ -50,6 +51,7 @@ function initSocket(server) {
     registerChatHandlers(io, socket);
     registerPresenceHandlers(io, socket);
     registerMatchmakingHandlers(io, socket);
+    registerWebRTCHandlers(io, socket);
 
     socket.on('disconnect', async (reason) => {
       console.log(`✗ Socket disconnected: ${socket.id} reason:${reason}`);

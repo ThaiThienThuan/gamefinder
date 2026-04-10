@@ -51,10 +51,19 @@ router.post('/matchmaking/stop', requireAuth, (req, res) => matchmakingControlle
 router.get('/matchmaking/status', requireAuth, (req, res) => matchmakingController.getStatus(req, res));
 router.get('/matchmaking/status-all', (req, res) => matchmakingController.getAllQueueStatus(req, res));
 
-// [MEDIASOUP_PLACEHOLDER] - TURN credentials endpoint (Phase D)
-// router.get('/turn-credentials', requireAuth, (req, res) => {...});
-
-// [MEDIASOUP_PLACEHOLDER] - Mediasoup transport endpoint (Phase D)
-// router.post('/mediasoup/transport', requireAuth, (req, res) => {...});
+// TURN credentials endpoint — Phase D
+const { generateTurnCredential } = require('../../Util/turnCredential');
+router.get('/turn-credentials', requireAuth, (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.guestId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Auth required' });
+    }
+    const creds = generateTurnCredential(userId);
+    res.status(200).json({ success: true, data: creds });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 module.exports = router;

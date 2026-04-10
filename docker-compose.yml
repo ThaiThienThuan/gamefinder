@@ -42,6 +42,7 @@ services:
     container_name: gamematch-api
     ports:
       - "4000:4000"
+      - "30000-30100:30000-30100/udp"
     environment:
       NODE_ENV: development
       MONGO_URI: mongodb://root:password@mongo:27017/gamematch?authSource=admin
@@ -62,6 +63,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      coturn:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 10s
@@ -123,20 +126,19 @@ services:
   #   networks:
   #     - gamematch-net
 
-  # [MEDIASOUP_PLACEHOLDER] - Uncomment in Phase D
-  # coturn:
-  #   image: coturn/coturn:latest
-  #   container_name: gamematch-coturn
-  #   ports:
-  #     - "3478:3478/tcp"
-  #     - "3478:3478/udp"
-  #     - "5349:5349/tcp"
-  #     - "5349:5349/udp"
-  #     - "30000-30100:30000-30100/udp"
-  #   volumes:
-  #     - ./infra/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-  #   networks:
-  #     - gamematch-net
+  coturn:
+    image: coturn/coturn:latest
+    container_name: gamematch-coturn
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "30000-30100:30000-30100/udp"
+    volumes:
+      - ./infra/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    networks:
+      - gamematch-net
 
 volumes:
   mongo_data:

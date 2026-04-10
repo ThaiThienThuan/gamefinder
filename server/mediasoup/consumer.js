@@ -1,27 +1,26 @@
-// [MEDIASOUP_PLACEHOLDER] - Mediasoup Consumer logic
-// This file will be populated in Phase D with consumer management
+// Consumer management — Phase D
 
-// [MEDIASOUP_PLACEHOLDER] - Consumer creation in Phase D
-// async function createConsumer(transport, producerId, rtpCapabilities) {
-//   try {
-//     const consumer = await transport.consume({
-//       producerId,
-//       rtpCapabilities,
-//       paused: false
-//     });
-//
-//     consumer.on('transportclose', () => {
-//       console.log('Consumer transport closed');
-//     });
-//
-//     return consumer;
-//   } catch (error) {
-//     console.error('Error creating consumer:', error);
-//     throw error;
-//   }
-// }
+async function createConsumer(router, producer, transport, rtpCapabilities) {
+  if (!router.canConsume({ producerId: producer.id, rtpCapabilities })) {
+    throw new Error('Cannot consume — incompatible RTP capabilities');
+  }
 
-module.exports = {
-  // [MEDIASOUP_PLACEHOLDER] - Export consumer functions in Phase D
-  // createConsumer
-};
+  const consumer = await transport.consume({
+    producerId: producer.id,
+    rtpCapabilities,
+    paused: true // Start paused, resume after transport connected
+  });
+
+  consumer.on('producerclose', () => {
+    console.log(`Consumer ${consumer.id} closed — producer closed`);
+    consumer.close();
+  });
+
+  consumer.on('score', (score) => {
+    // Monitor consumer quality
+  });
+
+  return consumer;
+}
+
+module.exports = { createConsumer };
