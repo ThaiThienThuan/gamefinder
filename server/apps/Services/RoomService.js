@@ -23,31 +23,35 @@ class RoomService {
       throw new Error('Owner not found');
     }
 
-    // Giới hạn: mỗi tài khoản chỉ có thể làm chủ 1 phòng đang mở
-    const existing = await this.roomRepository.findActiveByOwner(ownerId);
-    if (existing) {
-      const err = new Error('Bạn đã có 1 phòng đang mở. Hãy đóng phòng cũ trước khi tạo phòng mới.');
-      err.statusCode = 409;
-      err.existingRoomId = existing._id;
-      throw err;
-    }
+    // Chatroom (game='chatroom') là persistent group chat, không auto-close, ≤30 members.
+    // Chatroom được phép tạo nhiều — KHÔNG áp dụng giới hạn 1-phòng và không block nếu đang ở phòng khác.
+    const isChat = (roomData.game || 'lol') === 'chatroom';
 
-    // Giới hạn: không thể tạo phòng nếu đang tham gia phòng người khác
-    const memberships = await this.roomMemberRepository.findByUser(ownerId);
-    for (const m of memberships) {
-      const rm = m.roomId;
-      if (rm && rm.status && rm.status !== 'FINISHED') {
-        const roomOwner = await this.userRepository.findById(rm.ownerId);
-        const ownerName = roomOwner?.username || 'người khác';
-        const err = new Error(`Bạn đang tham gia phòng của "${ownerName}". Cần rời phòng trước khi tạo phòng mới.`);
+    if (!isChat) {
+      // Giới hạn (chỉ áp dụng phòng thường): mỗi tài khoản chỉ có thể làm chủ 1 phòng thường đang mở.
+      // Bỏ qua các phòng chatroom (persistent).
+      const existing = await this.roomRepository.findActiveByOwner(ownerId);
+      if (existing && !existing.isPersistent) {
+        const err = new Error('Bạn đã có 1 phòng đang mở. Hãy đóng phòng cũ trước khi tạo phòng mới.');
         err.statusCode = 409;
-        err.existingRoomId = rm._id;
+        err.existingRoomId = existing._id;
         throw err;
       }
-    }
 
-    // Chatroom (game='chatroom') là persistent group chat, không auto-close, ≤30 members
-    const isChat = (roomData.game || 'lol') === 'chatroom';
+      // Giới hạn: không thể tạo phòng thường nếu đang tham gia phòng THƯỜNG của người khác
+      const memberships = await this.roomMemberRepository.findByUser(ownerId);
+      for (const m of memberships) {
+        const rm = m.roomId;
+        if (rm && rm.status && rm.status !== 'FINISHED' && !rm.isPersistent) {
+          const roomOwner = await this.userRepository.findById(rm.ownerId);
+          const ownerName = roomOwner?.username || 'người khác';
+          const err = new Error(`Bạn đang tham gia phòng của "${ownerName}". Cần rời phòng trước khi tạo phòng mới.`);
+          err.statusCode = 409;
+          err.existingRoomId = rm._id;
+          throw err;
+        }
+      }
+    }
     const room = await this.roomRepository.create({
       ...roomData,
       game: roomData.game || 'lol',
@@ -100,10 +104,14 @@ class RoomService {
         if (!pending.includes(userId.toString())) {
           await this.roomRepository.updateById(roomId, { $addToSet: { pendingMembers: userId } });
         }
-        this.emit(`room:${roomId}`, 'room:join-requested', {
+        const payload = {
           roomId,
+          roomName: room.name,
           user: { id: user._id, username: user.username, avatar: user.avatar },
-        });
+        };
+        this.emit(`room:${roomId}`, 'room:join-requested', payload);
+        // Also notify owner on their personal channel so they receive it even if not currently viewing the room
+        this.emit(`user:${ownerIdStr}`, 'room:join-requested', payload);
         return { success: true, pending: true, room };
       }
     }

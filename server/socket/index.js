@@ -55,6 +55,10 @@ function initSocket(server) {
   io.on('connection', (socket) => {
     console.log(`✓ Socket connected: ${socket.id} user:${socket.user?.id || socket.user?.guestId || 'anonymous'}`);
 
+    // Personal channel — for direct-to-user events (join requests, etc.) regardless of which page/room they're on
+    const personalId = socket.user?.id || socket.user?.guestId;
+    if (personalId) socket.join(`user:${personalId}`);
+
     // If owner reconnected within grace period — cancel pending abandon
     const uid = socket.user?.id;
     if (uid && ownerGraceTimers.has(uid)) {
