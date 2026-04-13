@@ -59,8 +59,16 @@ class RiotController {
       const accUrl = `https://${accountRoute}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(name)}/${encodeURIComponent(tag)}`;
       const accRes = await fetch(accUrl, { headers });
       if (!accRes.ok) {
-        const body = await accRes.text().catch(() => '');
-        return res.status(accRes.status).json({ success: false, message: `Riot account lookup failed (${accRes.status})`, detail: body.slice(0, 200) });
+        if (accRes.status === 404) {
+          return res.status(404).json({ success: false, message: `Không tìm thấy người chơi "${name}#${tag}". Kiểm tra lại Riot ID và region.` });
+        }
+        if (accRes.status === 401 || accRes.status === 403) {
+          return res.status(accRes.status).json({ success: false, message: 'Riot API key hết hạn hoặc không hợp lệ. Liên hệ admin để cập nhật.' });
+        }
+        if (accRes.status === 429) {
+          return res.status(429).json({ success: false, message: 'Quá nhiều yêu cầu tới Riot API, thử lại sau giây lát.' });
+        }
+        return res.status(accRes.status).json({ success: false, message: `Lỗi Riot API (${accRes.status}).` });
       }
       const acc = await accRes.json();
 
@@ -68,8 +76,10 @@ class RiotController {
       const sumUrl = `https://${platform}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${acc.puuid}`;
       const sumRes = await fetch(sumUrl, { headers });
       if (!sumRes.ok) {
-        const body = await sumRes.text().catch(() => '');
-        return res.status(sumRes.status).json({ success: false, message: `Summoner lookup failed (${sumRes.status})`, detail: body.slice(0, 200) });
+        if (sumRes.status === 404) {
+          return res.status(404).json({ success: false, message: `Tài khoản "${name}#${tag}" chưa từng chơi LoL ở region ${region.toUpperCase()}.` });
+        }
+        return res.status(sumRes.status).json({ success: false, message: `Lỗi tra cứu summoner (${sumRes.status}).` });
       }
       const sum = await sumRes.json();
 
@@ -216,7 +226,14 @@ class RiotController {
       });
     } catch (err) {
       const status = err.status || 500;
-      res.status(status).json({ success: false, message: err.message });
+      let message = err.message;
+      const name = String(req.query.name || '').trim();
+      const tag = String(req.query.tag || '').trim();
+      const region = String(req.query.region || 'vn').toUpperCase();
+      if (status === 404) message = `Không tìm thấy người chơi "${name}#${tag}" ở region ${region}.`;
+      else if (status === 401 || status === 403) message = 'Riot API key hết hạn hoặc không hợp lệ.';
+      else if (status === 429) message = 'Quá nhiều yêu cầu tới Riot API, thử lại sau giây lát.';
+      res.status(status).json({ success: false, message });
     }
   }
 }
