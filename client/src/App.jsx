@@ -61,7 +61,9 @@ function adaptRoom(server, extras = {}) {
     rankRange: (server.rankMin || server.rankMax)
       ? [server.rankMin || "", server.rankMax || ""]
       : (extras.rankRange || null),
-    stylePreference: server.stylePreference || extras.stylePreference || ""
+    stylePreference: server.stylePreference || extras.stylePreference || "",
+    isPersistent: server.isPersistent ?? (server.game === 'chatroom'),
+    pendingMembers: Array.isArray(server.pendingMembers) ? server.pendingMembers : []
   };
 }
 
