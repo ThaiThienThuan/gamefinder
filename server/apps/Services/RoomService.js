@@ -100,7 +100,7 @@ class RoomService {
     if (room.isPersistent) {
       const ownerIdStr = room.ownerId?._id ? room.ownerId._id.toString() : room.ownerId.toString();
       if (userId.toString() !== ownerIdStr) {
-        const pending = (room.pendingMembers || []).map(String);
+        const pending = (room.pendingMembers || []).map(p => String(p?._id || p));
         if (!pending.includes(userId.toString())) {
           await this.roomRepository.updateById(roomId, { $addToSet: { pendingMembers: userId } });
         }
@@ -323,7 +323,7 @@ class RoomService {
     const ownerIdStr = room.ownerId?._id ? room.ownerId._id.toString() : room.ownerId.toString();
     if (ownerIdStr !== ownerId.toString()) throw new Error('Only owner can approve');
 
-    const pending = (room.pendingMembers || []).map(String);
+    const pending = (room.pendingMembers || []).map(p => String(p?._id || p));
     if (!pending.includes(targetUserId.toString())) throw new Error('User did not request to join');
     if (room.current >= room.slots) throw new Error('Room is full');
 
