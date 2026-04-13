@@ -113,6 +113,18 @@ export default function App(){
     return ()=>disconnect();
   },[user,loading,connect,disconnect]);
 
+  // Global listener: khi có người xin vào phòng mình → hiện toast ở bất kỳ page nào
+  useEffect(()=>{
+    if(!user) return;
+    const off=on('room:join-requested',({user:requester,roomName})=>{
+      if(!requester) return;
+      const name=requester.username||'Người chơi';
+      const rn=roomName?` "${roomName}"`:'';
+      toast(`👤 ${name} xin vào nhóm${rn}. Mở phòng để duyệt.`);
+    });
+    return ()=>off&&off();
+  },[user,on,toast]);
+
   // Check phòng đang mở — khi login + mỗi khi đổi page (về lobby, gameSelect, modeSelect)
   const refreshActiveRoom=useCallback(()=>{
     if(!user) return;
