@@ -49,7 +49,7 @@ function MatchFindingModal({isOpen,onClose,mode,rooms,onJoinRoom,onQueue}){
       ):found?(
         <div style={{textAlign:"center",padding:"24px 0"}}>
           <div style={{fontSize:36,marginBottom:14}}>✅</div>
-          <div style={{color:"#2aff5a",fontSize:17,fontWeight:700,marginBottom:8,fontFamily:"'Playfair Display',serif"}}>Đã tìm thấy phòng!</div>
+          <div style={{color:"#2aff5a",fontSize:17,fontWeight:700,marginBottom:8,fontFamily:"'Be Vietnam Pro', sans-serif"}}>Đã tìm thấy phòng!</div>
           <div style={{color:"#8b8072",fontSize:13,marginBottom:18}}>{found.name}</div>
           <GoldBtn onClick={()=>{onJoinRoom(found.id);closeAll();}}>Tham Gia Ngay</GoldBtn>
         </div>
@@ -59,7 +59,7 @@ function MatchFindingModal({isOpen,onClose,mode,rooms,onJoinRoom,onQueue}){
             <div style={{width:90,height:90,borderRadius:"50%",border:"3px solid #222",borderTopColor:"#c89b3c",animation:"spin 1s linear infinite"}}/>
             <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,fontWeight:700,color:"#c8aa6e"}}>{qt}s</div>
           </div>
-          <div style={{color:"#c8aa6e",fontSize:15,marginBottom:4,fontFamily:"'Playfair Display',serif"}}>Đang tìm kiếm...</div>
+          <div style={{color:"#c8aa6e",fontSize:15,marginBottom:4,fontFamily:"'Be Vietnam Pro', sans-serif"}}>Đang tìm kiếm...</div>
           <div style={{color:"#5b5a56",fontSize:12,marginBottom:18}}>Hệ thống đang so khớp yêu cầu</div>
           <GoldBtn variant="secondary" onClick={()=>{if(timer.current)clearInterval(timer.current);setSearching(false);}}>Hủy Tìm</GoldBtn>
         </div>

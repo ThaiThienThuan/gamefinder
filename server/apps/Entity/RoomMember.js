@@ -14,7 +14,7 @@ const roomMemberSchema = new mongoose.Schema(
     },
     position: {
       type: String,
-      enum: ['TOP', 'JUNGLE', 'MID', 'ADC', 'SUPPORT']
+      default: ''
     },
     joinedAt: {
       type: Date,

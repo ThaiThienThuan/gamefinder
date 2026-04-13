@@ -1,15 +1,21 @@
 {
-  "mongo": {
-    "uri": "mongodb://mongo:27017/gamematch"
-  },
   "server": {
     "port": 4000,
     "nodeEnv": "development",
     "logLevel": "dev"
   },
+  "mongo": {
+    "uri": ""
+  },
   "jwt": {
-    "secret": "your-jwt-secret-min-32-chars-change-in-prod",
+    "secret": "",
     "expiry": "7d"
+  },
+  "cors": {
+    "allowedOrigin": "http://localhost:5173"
+  },
+  "redis": {
+    "url": ""
   },
   "upload": {
     "maxFileSizeMB": 50,
@@ -23,22 +29,9 @@
       "video/webm"
     ]
   },
-  "cors": {
-    "allowedOrigin": "http://localhost:3000"
-  },
-  "redis": {
-    "host": "redis",
-    "port": 6379,
-    "password": null
-  },
-  "mediasoup": {
-    "listenIp": "0.0.0.0",
-    "announcedIp": "",
-    "minPort": 30000,
-    "maxPort": 30100
-  },
-  "turn": {
-    "secret": "dev-turn-secret-change-in-production",
-    "realm": "gamematch.local"
+  "livekit": {
+    "url": "",
+    "apiKey": "",
+    "apiSecret": ""
   }
 }

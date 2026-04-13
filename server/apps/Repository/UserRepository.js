@@ -13,6 +13,10 @@ class UserRepository {
     return await User.findOne({ username });
   }
 
+  async findByUsernameWithPassword(username) {
+    return await User.findOne({ username }).select('+password');
+  }
+
   async findByGuestId(guestId) {
     return await User.findOne({ guestId });
   }

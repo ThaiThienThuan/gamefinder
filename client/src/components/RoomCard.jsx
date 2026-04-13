@@ -6,7 +6,8 @@ import StatusDot from "./ui/StatusDot";
 
 function RoomCard({room,onClick,isOwn=false}){
   const [hovered,setHovered]=useState(false);
-  const pct=(room.members.length/room.maxPlayers)*100;
+  const memberCount=room.current||room.members?.length||0;
+  const pct=(memberCount/room.maxPlayers)*100;
   return(
     <div onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)} onClick={onClick}
       style={{cursor:"pointer",transition:"all .3s",transform:hovered?"translateY(-4px)":"none",opacity:room.status==="inactive"?.55:1}}
@@ -15,7 +16,7 @@ function RoomCard({room,onClick,isOwn=false}){
         <div style={{padding:16}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
             <div style={{flex:1,minWidth:0}}>
-              <div style={{fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:700,color:"#c8aa6e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+              <div style={{fontFamily:"'Be Vietnam Pro', sans-serif",fontSize:14,fontWeight:700,color:"#c8aa6e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                 {room.name}
               </div>
               <div style={{fontSize:10,color:"#333",marginTop:3}}>#{room.id.substring(0,6).toUpperCase()}</div>
@@ -30,7 +31,7 @@ function RoomCard({room,onClick,isOwn=false}){
           <div style={{marginBottom:10}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
               <span style={{fontSize:11,color:"#8b8072"}}>Thành viên</span>
-              <span style={{fontSize:11,color:"#c8aa6e",fontWeight:700}}>{room.members.length}/{room.maxPlayers}</span>
+              <span style={{fontSize:11,color:"#c8aa6e",fontWeight:700}}>{memberCount}/{room.maxPlayers}</span>
             </div>
             <div style={{height:4,background:"#111",borderRadius:2,overflow:"hidden"}}>
               <div style={{
@@ -40,7 +41,7 @@ function RoomCard({room,onClick,isOwn=false}){
             </div>
           </div>
           {/* Positions needed */}
-          {room.positionsNeeded.length>0&&(
+          {room.positionsNeeded?.length>0&&(
             <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
               {room.positionsNeeded.slice(0,4).map(p=>(
                 <span key={p} style={{fontSize:10,padding:"2px 8px",borderRadius:3,background:"#c89b3c0c",border:"1px solid #c89b3c25",color:"#c89b3c"}}>

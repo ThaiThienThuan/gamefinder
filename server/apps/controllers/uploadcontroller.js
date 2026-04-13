@@ -1,14 +1,13 @@
 const multer = require('multer');
-const path = require('path');
+const cloudinary = require('cloudinary').v2;
 const UploadService = require('../Services/UploadService');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, path.join(__dirname, '../../uploads'));
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}_${file.originalname}`);
-  }
+// Cloudinary config — reads CLOUDINARY_URL or individual vars from env
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true,
 });
 
 const ALLOWED_MIMES = [
@@ -16,17 +15,25 @@ const ALLOWED_MIMES = [
   'video/mp4', 'video/webm'
 ];
 
+// Memory storage — we stream buffer to Cloudinary instead of writing disk
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (ALLOWED_MIMES.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`File type ${file.mimetype} not allowed`));
-    }
-  }
+    if (ALLOWED_MIMES.includes(file.mimetype)) cb(null, true);
+    else cb(new Error(`File type ${file.mimetype} not allowed`));
+  },
 });
+
+function uploadBufferToCloudinary(buffer, { folder = 'gamematching', resource_type = 'auto' } = {}) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    stream.end(buffer);
+  });
+}
 
 class UploadController {
   constructor() {
@@ -36,37 +43,48 @@ class UploadController {
   async uploadFile(req, res) {
     try {
       if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          message: 'No file provided'
-        });
+        return res.status(400).json({ success: false, message: 'No file provided' });
       }
-
       const { roomId, messageId } = req.body;
-
       if (!roomId) {
-        return res.status(400).json({
-          success: false,
-          message: 'roomId is required'
-        });
+        return res.status(400).json({ success: false, message: 'roomId is required' });
       }
 
-      const attachment = await this.uploadService.saveAttachment(
-        req.file,
-        roomId,
-        req.user.id,
-        messageId
-      );
+      const resource = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
+      const result = await uploadBufferToCloudinary(req.file.buffer, {
+        folder: `gamematching/rooms/${roomId}`,
+        resource_type: resource,
+      });
 
-      res.status(201).json({
-        success: true,
-        data: attachment
+      const attachment = await this.uploadService.saveCloudAttachment({
+        roomId,
+        userId: req.user.id,
+        messageId,
+        url: result.secure_url,
+        publicId: result.public_id,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
       });
+
+      res.status(201).json({ success: true, data: attachment });
     } catch (error) {
-      res.status(400).json({
-        success: false,
-        message: error.message
+      res.status(400).json({ success: false, message: error.message });
+    }
+  }
+
+  async uploadAvatar(req, res) {
+    try {
+      if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
+      if (!req.file.mimetype.startsWith('image/')) {
+        return res.status(400).json({ success: false, message: 'Avatar must be an image' });
+      }
+      const result = await uploadBufferToCloudinary(req.file.buffer, {
+        folder: 'gamematching/avatars',
+        resource_type: 'image',
       });
+      res.status(201).json({ success: true, data: { url: result.secure_url } });
+    } catch (error) {
+      res.status(400).json({ success: false, message: error.message });
     }
   }
 
@@ -74,16 +92,9 @@ class UploadController {
     try {
       const { attachmentId } = req.params;
       const result = await this.uploadService.deleteAttachment(attachmentId, req.user.id);
-
-      res.status(200).json({
-        success: true,
-        data: result
-      });
+      res.status(200).json({ success: true, data: result });
     } catch (error) {
-      res.status(400).json({
-        success: false,
-        message: error.message
-      });
+      res.status(400).json({ success: false, message: error.message });
     }
   }
 
@@ -91,16 +102,9 @@ class UploadController {
     try {
       const { roomId } = req.params;
       const attachments = await this.uploadService.getAttachmentsByRoom(roomId);
-
-      res.status(200).json({
-        success: true,
-        data: attachments
-      });
+      res.status(200).json({ success: true, data: attachments });
     } catch (error) {
-      res.status(400).json({
-        success: false,
-        message: error.message
-      });
+      res.status(400).json({ success: false, message: error.message });
     }
   }
 }

@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
 const AttachmentRepository = require('../Repository/AttachmentRepository');
 const setting = require('../../Config/Setting.json');
 
@@ -62,23 +63,43 @@ class UploadService {
     };
   }
 
+  async saveCloudAttachment({ roomId, userId, messageId, url, publicId, mimetype, size }) {
+    const type = mimetype && mimetype.startsWith('video/') ? 'VIDEO' : 'IMAGE';
+    const attachment = await this.attachmentRepository.create({
+      roomId, userId, messageId, url, publicId, mimetype, size, type,
+    });
+    return {
+      id: attachment._id,
+      url: attachment.url,
+      type: attachment.type,
+      size: attachment.size,
+      mimetype: attachment.mimetype,
+    };
+  }
+
   async deleteAttachment(attachmentId, userId) {
     const attachment = await this.attachmentRepository.findById(attachmentId);
     if (!attachment) {
       throw new Error('Attachment not found');
     }
-
     if (attachment.userId.toString() !== userId.toString()) {
       throw new Error('Only attachment owner can delete it');
     }
-
-    const filepath = path.join(setting.upload.uploadDir, path.basename(attachment.url));
-    if (fs.existsSync(filepath)) {
-      fs.unlinkSync(filepath);
+    // Cloudinary delete (if publicId saved)
+    if (attachment.publicId) {
+      try {
+        await cloudinary.uploader.destroy(attachment.publicId, {
+          resource_type: attachment.type === 'VIDEO' ? 'video' : 'image',
+        });
+      } catch {}
+    } else {
+      // Legacy local file
+      try {
+        const filepath = path.join(setting.upload.uploadDir, path.basename(attachment.url));
+        if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      } catch {}
     }
-
     await this.attachmentRepository.deleteById(attachmentId);
-
     return { success: true };
   }
 

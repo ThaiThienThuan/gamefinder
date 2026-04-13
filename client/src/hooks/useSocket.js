@@ -60,8 +60,9 @@ export function useSocket() {
     return () => socketRef.current?.off(event, handler); // returns cleanup fn
   }, []);
 
-  const joinLobby = useCallback((mode) => {
-    emit('room:join-lobby', { mode: mode?.toUpperCase() });
+  const joinLobby = useCallback((game, mode) => {
+    if (!mode) return;
+    emit('room:join-lobby', { game: game || null, mode });
   }, [emit]);
 
   const leaveLobby = useCallback(() => {

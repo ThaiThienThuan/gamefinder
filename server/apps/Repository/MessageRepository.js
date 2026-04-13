@@ -20,7 +20,9 @@ class MessageRepository {
   }
 
   async findByIdWithUser(messageId) {
-    return await Message.findById(messageId).populate('userId', 'username avatar rank');
+    return await Message.findById(messageId)
+      .populate('userId', 'username avatar rank')
+      .populate('attachments');
   }
 
   async deleteById(messageId) {

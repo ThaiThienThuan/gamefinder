@@ -8,8 +8,9 @@ function registerChatHandlers(io, socket) {
       if (!socket.user) {
         return socket.emit('error', { message: 'Authentication required' });
       }
-      if (!roomId || !text?.trim()) {
-        return socket.emit('error', { message: 'roomId and text are required' });
+      const hasAttachments = Array.isArray(attachmentIds) && attachmentIds.length > 0;
+      if (!roomId || (!text?.trim() && !hasAttachments)) {
+        return socket.emit('error', { message: 'roomId and text or attachments are required' });
       }
 
       const userId = socket.user.id;
@@ -25,13 +26,25 @@ function registerChatHandlers(io, socket) {
 
       // MessageService saves to DB and emits to room channel
       const messageService = new MessageService(io);
-      await messageService.sendMessage(roomId, userId, text.trim(), attachmentIds || []);
+      await messageService.sendMessage(roomId, userId, text?.trim() || '', attachmentIds || []);
 
     } catch (err) {
       console.error('chat:message error:', err.message);
       socket.emit('error', { message: err.message });
     }
   });
+
+  // Typing indicator — relay to room (not sender). Client owns debounce/timeout.
+  const relayTyping = (event) => ({ roomId, name } = {}) => {
+    if (!roomId || !socket.user?.id) return;
+    socket.to(`room:${roomId}`).emit(event, {
+      roomId,
+      userId: socket.user.id,
+      name: name || '',
+    });
+  };
+  socket.on('chat:typing-start', relayTyping('chat:typing-start'));
+  socket.on('chat:typing-stop', relayTyping('chat:typing-stop'));
 }
 
 module.exports = registerChatHandlers;

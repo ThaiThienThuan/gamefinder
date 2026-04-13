@@ -35,11 +35,12 @@ class MessageService {
       throw new Error('User is not a member of this room');
     }
 
-    if (!text || text.trim().length === 0) {
-      throw new Error('Message text cannot be empty');
+    const hasAttachments = Array.isArray(attachmentIds) && attachmentIds.length > 0;
+    if ((!text || text.trim().length === 0) && !hasAttachments) {
+      throw new Error('Message text or attachments required');
     }
 
-    if (text.length > 500) {
+    if (text && text.length > 500) {
       throw new Error('Message exceeds maximum length of 500 characters');
     }
 

@@ -1,7 +1,7 @@
 {
-  "name": "gamematch-backend",
+  "name": "gamematching-backend",
   "version": "1.0.0",
-  "description": "GameMatch MERN Backend - Phase A",
+  "description": "GameMatching MERN Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,22 +14,24 @@
     "mern",
     "express",
     "mongodb",
-    "gamematch"
+    "gamematching"
   ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@socket.io/redis-adapter": "^8.1.0",
-    "bcrypt": "^5.1.0",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "bcrypt": "^5.1.1",
+    "cloudinary": "^2.9.0",
     "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.18.2",
-    "ioredis": "^5.3.0",
-    "jsonwebtoken": "^9.1.2",
-    "mediasoup": "^3.13.0",
-    "mongoose": "^7.5.0",
+    "ioredis": "^5.3.2",
+    "jsonwebtoken": "^9.0.2",
+    "livekit-server-sdk": "^2.6.1",
+    "mongoose": "^8.1.0",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
-    "socket.io": "^4.7.0"
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
     "eslint": "^8.50.0",

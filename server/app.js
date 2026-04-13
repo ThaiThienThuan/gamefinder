@@ -9,8 +9,14 @@ const router = require('./apps/controllers/index');
 const app = express();
 
 // Middleware
-app.use(morgan(setting.server.logLevel));
-app.use(cors({ origin: setting.cors.allowedOrigin }));
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || setting.cors.allowedOrigin;
+const LOG_LEVEL = process.env.LOG_LEVEL || setting.server.logLevel;
+
+app.use(morgan(LOG_LEVEL));
+app.use(cors({
+  origin: ALLOWED_ORIGIN.includes(',') ? ALLOWED_ORIGIN.split(',') : ALLOWED_ORIGIN,
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

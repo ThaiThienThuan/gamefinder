@@ -7,8 +7,9 @@ class RoomController {
 
   async listRooms(req, res) {
     try {
-      const { mode, status } = req.query;
+      const { game, mode, status } = req.query;
       const filters = {};
+      if (game) filters.game = game;
       if (mode) filters.mode = mode;
       if (status) filters.status = status;
 
@@ -28,21 +29,44 @@ class RoomController {
 
   async createRoom(req, res) {
     try {
-      const { name, mode, slots } = req.body;
-      if (!name || !mode || !slots) {
+      const { game, name, mode, slots, rankMin, rankMax, positions, stylePreference, voiceChat, note } = req.body;
+      if (!game || !name || !mode || !slots) {
         return res.status(400).json({
           success: false,
-          message: 'name, mode, and slots are required'
+          message: 'game, name, mode, and slots are required'
         });
       }
 
       const io = (() => { try { return getIO(); } catch { return null; } })();
       const service = new RoomService(io);
-      const room = await service.createRoom(req.user.id, { name, mode, slots });
+      const room = await service.createRoom(req.user.id, {
+        game, name, mode, slots,
+        rankMin: rankMin || '',
+        rankMax: rankMax || '',
+        positions: Array.isArray(positions) ? positions : [],
+        stylePreference: stylePreference || '',
+        voiceChat: voiceChat ?? true,
+        note: note || ''
+      });
 
       res.status(201).json({ success: true, data: room });
     } catch (error) {
-      res.status(400).json({ success: false, message: error.message });
+      const status = error.statusCode || 400;
+      res.status(status).json({
+        success: false,
+        message: error.message,
+        ...(error.existingRoomId ? { existingRoomId: error.existingRoomId } : {})
+      });
+    }
+  }
+
+  async getMyActiveRoom(req, res) {
+    try {
+      const service = new RoomService();
+      const room = await service.getMyActiveRoom(req.user.id);
+      res.status(200).json({ success: true, data: room });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
     }
   }
 
@@ -137,6 +161,34 @@ class RoomController {
         success: false,
         message: error.message
       });
+    }
+  }
+
+  async approveJoin(req, res) {
+    try {
+      const { id } = req.params;
+      const { targetUserId } = req.body;
+      if (!targetUserId) return res.status(400).json({ success: false, message: 'targetUserId required' });
+      const io = (() => { try { return getIO(); } catch { return null; } })();
+      const service = new RoomService(io);
+      const result = await service.approveJoin(id, req.user.id, targetUserId);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      res.status(400).json({ success: false, message: error.message });
+    }
+  }
+
+  async rejectJoin(req, res) {
+    try {
+      const { id } = req.params;
+      const { targetUserId } = req.body;
+      if (!targetUserId) return res.status(400).json({ success: false, message: 'targetUserId required' });
+      const io = (() => { try { return getIO(); } catch { return null; } })();
+      const service = new RoomService(io);
+      const result = await service.rejectJoin(id, req.user.id, targetUserId);
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      res.status(400).json({ success: false, message: error.message });
     }
   }
 

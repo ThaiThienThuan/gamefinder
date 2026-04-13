@@ -20,7 +20,7 @@ function GoldBtn({children,onClick,disabled=false,variant="primary",size="md",st
     <button onClick={onClick} disabled={disabled} style={{
       background:bg[variant],border:bd[variant],color:fg[variant],
       padding:pad[size],fontSize:fs[size],borderRadius:4,
-      fontFamily:"'Playfair Display',serif",fontWeight:700,letterSpacing:1,
+      fontFamily:"'Be Vietnam Pro', sans-serif",fontWeight:700,letterSpacing:1,
       textTransform:"uppercase",cursor:disabled?"not-allowed":"pointer",
       transition:"all .2s",whiteSpace:"nowrap",...extra,
     }}

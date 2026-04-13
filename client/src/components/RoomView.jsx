@@ -1,11 +1,110 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { POS_ICONS } from "../constants";
-import { pick, randInt } from "../utils/helpers";
+import { CYBER, neonGlow } from "../constants/theme";
+import { getCommandHandler, getPlaceholder, isHelpCommand, buildHelpText } from "../constants/gameCommands";
 import GoldBtn from "./ui/GoldBtn";
 import StatusDot from "./ui/StatusDot";
 import RankBadge from "./ui/RankBadge";
+import LiveKitRoom from "./LiveKitRoom";
+import { useLiveKit } from "../hooks/useLiveKit";
+import apiClient from "../lib/apiClient";
+import EditRoomModal from "./EditRoomModal";
+import ProfileModal from "./ProfileModal";
 
-function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
+// ── Standalone Mic Test (Discord-style) ────────────────────────────────
+function MicTestBtn(){
+  const [testing,setTesting]=useState(false);
+  const [level,setLevel]=useState(0);
+  const refs=useRef({stream:null,ctx:null,analyser:null,timer:null});
+
+  const start=async()=>{
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+      const ctx=new (window.AudioContext||window.webkitAudioContext)();
+      await ctx.resume();
+      const analyser=ctx.createAnalyser();
+      analyser.fftSize=256;
+      analyser.smoothingTimeConstant=0.3;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      const buf=new Uint8Array(analyser.frequencyBinCount);
+      refs.current={stream,ctx,analyser,timer:setInterval(()=>{
+        analyser.getByteFrequencyData(buf);
+        const avg=buf.reduce((a,b)=>a+b,0)/buf.length;
+        setLevel(Math.min(100,Math.round((avg/40)*100)));
+      },50)};
+      setTesting(true);
+    }catch(e){
+      alert("Không thể truy cập mic: "+e.message);
+    }
+  };
+
+  const stop=()=>{
+    const r=refs.current;
+    if(r.timer) clearInterval(r.timer);
+    if(r.ctx) r.ctx.close();
+    if(r.stream) r.stream.getTracks().forEach(t=>t.stop());
+    refs.current={stream:null,ctx:null,analyser:null,timer:null};
+    setTesting(false);
+    setLevel(0);
+  };
+
+  useEffect(()=>()=>stop(),[]);
+
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:10,width:"100%"}}>
+      <button onClick={testing?stop:start}
+        style={{padding:"6px 16px",borderRadius:4,cursor:"pointer",fontWeight:700,fontSize:11,
+          background:testing?"#f04747":"#3ba55d",border:"none",color:"#fff",transition:"opacity .2s",
+          minWidth:60}}
+        onMouseOver={e=>e.currentTarget.style.opacity="0.8"}
+        onMouseOut={e=>e.currentTarget.style.opacity="1"}>
+        {testing?"Stop":"Test"}
+      </button>
+      <div style={{flex:1,height:20,background:"#141420",borderRadius:4,overflow:"hidden",display:"flex",alignItems:"center",padding:"0 4px",gap:2}}>
+        {Array.from({length:20}).map((_,i)=>{
+          const active=level>(i*5);
+          const color=i<12?"#3ba55d":i<16?"#faa61a":"#f04747";
+          return <div key={i} style={{
+            flex:1,height:12,borderRadius:2,
+            background:active?color:"#1e1e30",
+            transition:"background .05s"
+          }}/>;
+        })}
+      </div>
+      {testing&&<span style={{fontSize:10,color:"#3ba55d",fontWeight:700,minWidth:30}}>{level}%</span>}
+    </div>
+  );
+}
+
+function RoomView({room,onLeave,onKick,isOwner,userId,socketEmit,socketOn,onBackToLobby}){
+  // Helper: check if a member is the current user
+  const isSelfId=(id)=>id==="self"||String(id)===String(userId);
+  // Helper: deduplicate voice members by id
+  const dedupeVoice=(arr)=>{
+    const seen=new Set();
+    return arr.filter(m=>{
+      const k=String(m.id);
+      if(seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  };
+
+  // ── Room metadata (can be updated realtime) ─────────────────────────
+  const [roomData,setRoomData]=useState(room);
+  useEffect(()=>{ setRoomData(room); },[room]);
+  const [showEditRoom,setShowEditRoom]=useState(false);
+  const [typingUsers,setTypingUsers]=useState([]); // [{userId,name}]
+  const [profileUser,setProfileUser]=useState(null); // opened profile user
+  // ── Pending join requests (persistent chatroom) ──────────────────────
+  const [pendingList,setPendingList]=useState([]); // [{_id/id, username, avatar}]
+  useEffect(()=>{
+    const pm=roomData?.pendingMembers||room?.pendingMembers||[];
+    if(Array.isArray(pm)){
+      setPendingList(pm.map(u=>(typeof u==='object'?u:{_id:u,username:'User'})));
+    }
+  },[roomData,room]);
+
   // ── Chat ──────────────────────────────────────────────────────────────
   const [msgs,setMsgs]=useState([{id:1,sender:"Hệ thống",text:"Chào mừng đến phòng! Hãy chào nhau và sẵn sàng chiến đấu.",system:true,time:Date.now()}]);
   const [input,setInput]=useState("");
@@ -26,6 +125,7 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   const [speaking,setSpeaking]=useState(false);
   const [voiceMembers,setVoiceMembers]=useState([]);
   const [voiceError,setVoiceError]=useState(null);
+  const [micLevel,setMicLevel]=useState(0); // 0-100 real-time volume
 
   // ── Voice Settings & Keybinds ─────────────────────────────────────────
   const [showVoiceSettings,setShowVoiceSettings]=useState(false);
@@ -45,6 +145,19 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   const [nsEnabled,setNsEnabled]=useState(false);
   const [nsLevel,setNsLevel]=useState("medium"); // "low" | "medium" | "high"
 
+  // ── LiveKit ────────────────────────────────────────────────────────────
+  const { token:lkToken, serverUrl:lkUrl, requestToken:lkRequestToken, reset:lkReset, error:lkError } = useLiveKit();
+  const [lkConnected,setLkConnected]=useState(false);
+  const lkControlsRef=useRef(null); // LiveKit mic/camera controls
+  const [cameraOn,setCameraOn]=useState(false);
+  const [screenSharing,setScreenSharing]=useState(false);
+  const [videoHeight,setVideoHeight]=useState(300); // resizable video area height
+  const [remoteTrackCount,setRemoteTrackCount]=useState(0);
+  const videoDragRef=useRef(null);
+  const [micGain,setMicGain]=useState(100); // input mic volume 0-200%
+  const [userVolumes,setUserVolumes]=useState({}); // {userId: 0-200}
+  const [volumePopup,setVolumePopup]=useState(null); // userId or null
+
   // ── Media / Lightbox ──────────────────────────────────────────────────
   const [lightbox,setLightbox]=useState(null);
 
@@ -55,7 +168,6 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   const audioCtxRef=useRef(null);
   const analyserRef=useRef(null);
   const speakTimerRef=useRef(null);
-  const simTimerRef=useRef(null);
   const mutedRef=useRef(false);
   const pttActiveRef=useRef(false);
   const micModeRef=useRef("always"); // mirror of micMode for closures
@@ -63,14 +175,14 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   const nsEnabledRef=useRef(false); // mirror of nsEnabled for use in closures
   const nsLevelRef=useRef("medium");
   const speakFramesRef=useRef(0);   // for noise gate hysteresis
+  const voiceJoinedRef=useRef(false);
 
   // Keep refs in sync with state
   useEffect(()=>{ mutedRef.current=muted; },[muted]);
   useEffect(()=>{ pttActiveRef.current=pttActive; },[pttActive]);
   useEffect(()=>{ nsEnabledRef.current=nsEnabled; nsLevelRef.current=nsLevel; },[nsEnabled,nsLevel]);
   useEffect(()=>{ micModeRef.current=micMode; },[micMode]);
-
-  const chatReplies=["gg","let's go!","ai jungle?","pick gì vậy?","có mic không?","rank mấy?","chơi thôi!","sẵn sàng!","team mạnh đấy","oke bro","lên rank nào","nice!","wp","ez clap","carry thôi"];
+  useEffect(()=>{ voiceJoinedRef.current=voiceJoined; },[voiceJoined]);
 
   // ── Effects ───────────────────────────────────────────────────────────
   useEffect(()=>{
@@ -90,19 +202,250 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   useEffect(()=>{ chatEnd.current?.scrollIntoView({behavior:"smooth"}); },[msgs]);
   useEffect(()=>()=>cleanupAudio(),[]);
 
-  useEffect(()=>{
-    setVoiceMembers(prev=>prev.map(m=>m.id==="self"?{...m,muted,speaking:!muted&&speaking}:m));
-  },[speaking,muted]);
+  // Derive speaking from micLevel directly (more reliable than VAD)
+  const isSpeaking=!muted&&micLevel>8;
 
+  // Update self muted/speaking locally + broadcast to server
+  const lastBroadcast=useRef({muted:false,speaking:false});
   useEffect(()=>{
-    if(!voiceJoined) return;
-    simTimerRef.current=setInterval(()=>{
+    setVoiceMembers(prev=>prev.map(m=>isSelfId(m.id)?{...m,muted,speaking:isSpeaking}:m));
+    if(voiceJoinedRef.current){
+      if(lastBroadcast.current.muted!==muted||lastBroadcast.current.speaking!==isSpeaking){
+        lastBroadcast.current={muted,speaking:isSpeaking};
+        socketEmit?.('voice:state',{roomId:room._id||room.id,userId,muted,speaking:isSpeaking});
+      }
+    }
+  },[isSpeaking,muted]);
+
+  // ── Voice sync — server-managed single source of truth ────────────────
+  const prevVoiceIdsRef=useRef(new Set());
+  useEffect(()=>{
+    if(!socketOn) return;
+
+    // Server sends full voice member list on join/leave/room-enter
+    const offMembers=socketOn('voice:members',({roomId:rid,members})=>{
+      if(!members) return;
+      const currentRoomId=room._id||room.id;
+      if(rid&&String(rid)!==String(currentRoomId)) return;
+
+      const newIds=new Set(members.map(m=>String(m.userId)));
+      const oldIds=prevVoiceIdsRef.current;
+
+      // Detect who joined/left for system messages
+      for(const m of members){
+        if(!oldIds.has(String(m.userId))&&!isSelfId(m.userId)){
+          addSysMsg(`${m.name||"Người chơi"} đã tham gia kênh thoại.`);
+        }
+      }
+      for(const uid of oldIds){
+        if(!newIds.has(uid)&&!isSelfId(uid)){
+          addSysMsg("Người chơi đã rời kênh thoại.");
+        }
+      }
+      prevVoiceIdsRef.current=newIds;
+
+      // Build voice member list — preserve self's local speaking state
+      setVoiceMembers(prev=>{
+        const list=members.map(m=>{
+          const isSelf=isSelfId(m.userId);
+          const prevSelf=isSelf?prev.find(p=>isSelfId(p.id)):null;
+          return {
+            id:m.userId,
+            name:isSelf?"Bạn":(m.name||"Người chơi"),
+            muted:isSelf?mutedRef.current:(m.muted??false),
+            speaking:isSelf?(prevSelf?.speaking??false):(m.speaking??false)
+          };
+        });
+        return dedupeVoice(list);
+      });
+
+      // Auto-set voiceJoined if self is in the list
+      if(members.some(m=>isSelfId(m.userId))) {
+        if(!voiceJoinedRef.current){ setVoiceJoined(true); }
+      }
+    });
+
+    // Individual state updates (speaking/muted) from other users
+    const offState=socketOn('voice:state',(data)=>{
+      if(!data||isSelfId(data.userId)) return;
       setVoiceMembers(prev=>prev.map(m=>
-        m.id!=="self"?{...m,speaking:!m.muted&&Math.random()>0.62}:m
+        String(m.id)===String(data.userId)
+          ?{...m,muted:data.muted??m.muted,speaking:data.speaking??m.speaking}
+          :m
       ));
-    },1600);
-    return ()=>{ if(simTimerRef.current) clearInterval(simTimerRef.current); };
-  },[voiceJoined]);
+    });
+
+    // Request current voice state on mount
+    socketEmit?.('voice:get-members',{roomId:room._id||room.id});
+
+    return ()=>{ offMembers(); offState(); };
+  },[socketOn,userId]);
+
+  // ── Room lifecycle: ownership transfer & deletion ───────────────────
+  useEffect(()=>{
+    if(!socketOn) return;
+    const myRoomId=room._id||room.id;
+    const offTransfer=socketOn('room:ownership-transferred',({roomId:rid,newOwnerId,newOwnerName})=>{
+      if(String(rid)!==String(myRoomId)) return;
+      const mine=isSelfId(newOwnerId);
+      try{ alert(mine?'Bạn là trưởng phòng mới':`${newOwnerName||'Thành viên'} là trưởng phòng mới`); }catch{}
+    });
+    const offDeleted=socketOn('room:deleted',({roomId:rid})=>{
+      if(String(rid)!==String(myRoomId)) return;
+      try{ alert('Phòng đã bị đóng'); }catch{}
+      onLeave?.();
+    });
+    const offUpdated=socketOn('room:updated',(updated)=>{
+      if(!updated) return;
+      const rid=updated._id||updated.id;
+      if(String(rid)!==String(myRoomId)) return;
+      setRoomData(prev=>({...prev,...updated}));
+    });
+    return ()=>{ offTransfer(); offDeleted(); offUpdated(); };
+  },[socketOn,room,onLeave]);
+
+  // ── Typing indicator listener ───────────────────────────────────────
+  useEffect(()=>{
+    if(!socketOn) return;
+    const timers=new Map();
+    const myRoomId=room._id||room.id;
+    const onStart=({roomId:rid,userId:uid,name})=>{
+      if(String(rid)!==String(myRoomId)) return;
+      if(isSelfId(uid)) return;
+      setTypingUsers(prev=>{
+        const others=prev.filter(u=>String(u.userId)!==String(uid));
+        return [...others,{userId:uid,name:name||'Người chơi'}];
+      });
+      if(timers.has(String(uid))) clearTimeout(timers.get(String(uid)));
+      timers.set(String(uid),setTimeout(()=>{
+        setTypingUsers(prev=>prev.filter(u=>String(u.userId)!==String(uid)));
+      },5000));
+    };
+    const onStop=({roomId:rid,userId:uid})=>{
+      if(String(rid)!==String(myRoomId)) return;
+      if(timers.has(String(uid))){ clearTimeout(timers.get(String(uid))); timers.delete(String(uid)); }
+      setTypingUsers(prev=>prev.filter(u=>String(u.userId)!==String(uid)));
+    };
+    const offA=socketOn('chat:typing-start',onStart);
+    const offB=socketOn('chat:typing-stop',onStop);
+    return ()=>{ offA(); offB(); for(const t of timers.values()) clearTimeout(t); };
+  },[socketOn,room,userId]);
+
+  // ── Typing emit (debounced) ─────────────────────────────────────────
+  const typingRef=useRef({lastSent:0,stopTimer:null,selfName:null});
+  const getSelfName=()=>{
+    if(typingRef.current.selfName) return typingRef.current.selfName;
+    const m=(roomData.members||[]).find(x=>isSelfId(x.id||x._id));
+    const n=m?.name||m?.username||"";
+    if(n) typingRef.current.selfName=n;
+    return n;
+  };
+  const notifyTyping=()=>{
+    const rid=room._id||room.id;
+    const now=Date.now();
+    if(now-typingRef.current.lastSent>1500){
+      typingRef.current.lastSent=now;
+      socketEmit?.('chat:typing-start',{roomId:rid,name:getSelfName()});
+    }
+    if(typingRef.current.stopTimer) clearTimeout(typingRef.current.stopTimer);
+    typingRef.current.stopTimer=setTimeout(()=>{
+      socketEmit?.('chat:typing-stop',{roomId:rid});
+      typingRef.current.lastSent=0;
+    },3000);
+  };
+  const cancelTyping=()=>{
+    const rid=room._id||room.id;
+    if(typingRef.current.stopTimer){ clearTimeout(typingRef.current.stopTimer); typingRef.current.stopTimer=null; }
+    if(typingRef.current.lastSent){ socketEmit?.('chat:typing-stop',{roomId:rid}); typingRef.current.lastSent=0; }
+  };
+
+  // ── Pending join-request listeners (persistent chatroom owner) ──────
+  useEffect(()=>{
+    if(!socketOn) return;
+    const myRoomId=room._id||room.id;
+    const offReq=socketOn('room:join-requested',({roomId:rid,user})=>{
+      if(String(rid)!==String(myRoomId)||!user) return;
+      setPendingList(prev=>{
+        const uid=String(user.id||user._id);
+        if(prev.some(p=>String(p._id||p.id)===uid)) return prev;
+        return [...prev,{_id:user.id||user._id,username:user.username,avatar:user.avatar}];
+      });
+    });
+    const offApp=socketOn('room:join-approved',({roomId:rid,userId:uid})=>{
+      if(String(rid)!==String(myRoomId)) return;
+      setPendingList(prev=>prev.filter(p=>String(p._id||p.id)!==String(uid)));
+    });
+    const offRej=socketOn('room:join-rejected',({roomId:rid,userId:uid})=>{
+      if(String(rid)!==String(myRoomId)) return;
+      setPendingList(prev=>prev.filter(p=>String(p._id||p.id)!==String(uid)));
+    });
+    return ()=>{offReq?.();offApp?.();offRej?.();};
+  },[socketOn,room]);
+
+  const approvePending=async(targetUserId)=>{
+    const rid=room._id||room.id;
+    try{
+      await apiClient.post(`/api/rooms/${rid}/approve-join`,{targetUserId});
+      setPendingList(prev=>prev.filter(p=>String(p._id||p.id)!==String(targetUserId)));
+    }catch(e){ alert(e.response?.data?.error||'Duyệt thất bại'); }
+  };
+  const rejectPending=async(targetUserId)=>{
+    const rid=room._id||room.id;
+    try{
+      await apiClient.post(`/api/rooms/${rid}/reject-join`,{targetUserId});
+      setPendingList(prev=>prev.filter(p=>String(p._id||p.id)!==String(targetUserId)));
+    }catch(e){ alert(e.response?.data?.error||'Từ chối thất bại'); }
+  };
+
+  // ── Kick listener — force leave when kicked by owner ────────────────
+  useEffect(()=>{
+    if(!socketOn) return;
+    const off=socketOn('room:kicked',({roomId:rid,userId:kickedId})=>{
+      const myRoomId=room._id||room.id;
+      if(String(rid)!==String(myRoomId)) return;
+      if(!isSelfId(kickedId)) return;
+      try{ alert('Bạn đã bị loại khỏi tổ đội'); }catch{}
+      onLeave?.();
+    });
+    return ()=>off();
+  },[socketOn,room,onLeave]);
+
+  // ── Chat socket — receive messages from other users ─────────────────
+  useEffect(()=>{
+    if(!socketOn) return;
+    const apiOrigin=import.meta.env.VITE_API_URL||'http://localhost:4000';
+    const resolveUrl=(u)=>!u?u:(u.startsWith('http')?u:`${apiOrigin}${u.startsWith('/')?'':'/'}${u}`);
+    const offMsg=socketOn('chat:message',(msg)=>{
+      if(!msg) return;
+      const senderName=msg.userId?.username||msg.sender||"Người chơi";
+      const isSelf=isSelfId(msg.userId?._id||msg.userId);
+      const t=msg.createdAt?new Date(msg.createdAt).getTime():Date.now();
+      setMsgs(prev=>{
+        if(msg._id&&prev.find(m=>m._id===msg._id)) return prev;
+        const items=[];
+        const senderId=msg.userId?._id||msg.userId;
+        if(msg.text&&msg.text.trim()){
+          items.push({id:msg._id||Date.now(),_id:msg._id,sender:isSelf?"Bạn":senderName,senderId,text:msg.text,time:t,system:false});
+        }
+        const atts=Array.isArray(msg.attachments)?msg.attachments:[];
+        atts.forEach((a,i)=>{
+          const mime=a.mimetype||'';
+          const kind=mime.startsWith('image/')?'image':mime.startsWith('video/')?'video':'file';
+          items.push({
+            id:(msg._id||Date.now())+'-a'+i,
+            _id:msg._id?`${msg._id}-a${i}`:undefined,
+            sender:isSelf?"Bạn":senderName,senderId,
+            type:kind,src:resolveUrl(a.url),
+            fileName:a.filename||a.originalname||'file',fileSize:a.size||0,
+            time:t,system:false,
+          });
+        });
+        if(items.length===0) return prev;
+        return [...prev,...items];
+      });
+    });
+    return ()=>offMsg();
+  },[socketOn,userId]);
 
   // ── Keyboard Shortcuts ────────────────────────────────────────────────
   useEffect(()=>{
@@ -111,23 +454,25 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
 
     const onKeyDown=(e)=>{
       if(listeningFor) return;
-      // Don't fire when typing in an input
       const tag=document.activeElement?.tagName;
-      if(tag==="INPUT"||tag==="TEXTAREA") return;
-
+      const isTyping=tag==="INPUT"||tag==="TEXTAREA";
       const key=e.key.length===1?e.key.toUpperCase():e.key;
       const pttKey=keybinds.pushToTalk.toUpperCase();
       const muteKey=keybinds.mute.toUpperCase();
 
-      if(key===pttKey&&!pttHeld){
+      if(key===pttKey&&micModeRef.current==="ptt"){
         e.preventDefault();
-        pttHeld=true;
-        pttActiveRef.current=true;
-        setPttActive(true);
-        // Enable mic regardless of muted state
-        if(streamRef.current) streamRef.current.getAudioTracks().forEach(t=>{t.enabled=true;});
+        if(isTyping) document.activeElement?.blur();
+        if(!pttHeld){
+          pttHeld=true;
+          pttActiveRef.current=true;
+          setPttActive(true);
+          console.log("[PTT] Key DOWN — mic ON");
+          if(lkControlsRef.current){ lkControlsRef.current.setMicMuted(false); console.log("[PTT] LiveKit mic unmuted"); }
+          if(streamRef.current) streamRef.current.getAudioTracks().forEach(t=>{t.enabled=true;});
+        }
       }
-      if(key===muteKey){
+      if(key===muteKey&&!isTyping){
         e.preventDefault();
         setMuted(prev=>{
           const next=!prev;
@@ -151,10 +496,10 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
         pttHeld=false;
         pttActiveRef.current=false;
         setPttActive(false);
-        // Restore muted state
-        const isMuted=mutedRef.current;
-        if(streamRef.current) streamRef.current.getAudioTracks().forEach(t=>{t.enabled=!isMuted;});
-        if(isMuted) setSpeaking(false);
+        console.log("[PTT] Key UP — mic OFF");
+        if(lkControlsRef.current){ lkControlsRef.current.setMicMuted(true); console.log("[PTT] LiveKit mic muted"); }
+        if(streamRef.current) streamRef.current.getAudioTracks().forEach(t=>{t.enabled=false;});
+        setSpeaking(false);
       }
     };
 
@@ -251,6 +596,9 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
       if(!analyserRef.current) return;
       analyserRef.current.getByteFrequencyData(buf);
       const avg=buf.reduce((a,b)=>a+b,0)/buf.length;
+      // Update volume meter (0-100 scale, capped)
+      const pct=Math.min(100,Math.round((avg/50)*100));
+      setMicLevel(mutedRef.current?0:pct);
       if(avg>threshold){
         speakFramesRef.current=Math.min(speakFramesRef.current+1,framesNeeded+1);
       }else{
@@ -262,19 +610,22 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
 
   const cleanupAudio=()=>{
     if(speakTimerRef.current){ clearInterval(speakTimerRef.current); speakTimerRef.current=null; }
-    if(simTimerRef.current){ clearInterval(simTimerRef.current); simTimerRef.current=null; }
     teardownNsChain();
     if(audioCtxRef.current){ audioCtxRef.current.close(); audioCtxRef.current=null; }
     if(streamRef.current){ streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
     analyserRef.current=null;
     speakFramesRef.current=0;
+    setMicLevel(0);
   };
 
-  const startAnalyser=(stream,nsOn=false,level="medium")=>{
+  const startAnalyser=async(stream,nsOn=false,level="medium")=>{
     try{
       const ctx=new (window.AudioContext||window.webkitAudioContext)();
+      // MUST await resume — browser suspends context until user gesture
+      await ctx.resume();
       const analyser=ctx.createAnalyser();
-      analyser.fftSize=512;
+      analyser.fftSize=256; // smaller = more responsive
+      analyser.smoothingTimeConstant=0.3;
       const source=ctx.createMediaStreamSource(stream);
 
       if(nsOn){
@@ -287,7 +638,7 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
       audioCtxRef.current=ctx;
       analyserRef.current=analyser;
       startVadPolling(analyser,nsOn,level);
-    }catch(e){}
+    }catch(e){ console.error("startAnalyser error:",e); }
   };
 
   // Toggle or change NS level while already in a call
@@ -297,7 +648,12 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
     setNsEnabled(enabled);
     setNsLevel(level);
 
-    // Apply browser-native constraints
+    // Apply via LiveKit track
+    if(lkControlsRef.current?.setNoiseSuppression){
+      await lkControlsRef.current.setNoiseSuppression(enabled);
+    }
+
+    // Fallback: apply browser-native constraints on local stream
     if(streamRef.current){
       const track=streamRef.current.getAudioTracks()[0];
       if(track){
@@ -336,6 +692,7 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
       // Switch to PTT: mute immediately (PTT key will unmute on hold)
       mutedRef.current=true;
       setMuted(true);
+      if(lkControlsRef.current) lkControlsRef.current.setMicMuted(true);
       if(!pttActiveRef.current&&streamRef.current)
         streamRef.current.getAudioTracks().forEach(t=>{t.enabled=false;});
       setSpeaking(false);
@@ -343,6 +700,7 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
       // Switch to always: unmute (restore open mic)
       mutedRef.current=false;
       setMuted(false);
+      if(lkControlsRef.current) lkControlsRef.current.setMicMuted(false);
       if(!pttActiveRef.current&&streamRef.current)
         streamRef.current.getAudioTracks().forEach(t=>{t.enabled=true;});
     }
@@ -350,7 +708,31 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
 
   // ── Voice actions ──────────────────────────────────────────────────────
   const joinVoice=async()=>{
+    if(voiceJoinedRef.current) return; // prevent double-join
     setVoiceError(null);
+
+    // Try to connect via LiveKit first
+    const roomId=room._id||room.id;
+    const selfMember=room.members.find(m=>isSelfId(m.id))||{id:userId||"self",name:"Bạn"};
+    const participantName=selfMember.name||"Bạn";
+
+    console.log("[Voice] Requesting LiveKit token for room:", roomId, "participant:", participantName);
+    const lkResult=await lkRequestToken({roomId, participantName});
+    console.log("[Voice] LiveKit result:", lkResult?"token received":"null");
+    if(lkResult?.token){
+      setLkConnected(true);
+      setVoiceJoined(true);
+      // LiveKit handles mic entirely — no separate getUserMedia needed
+      socketEmit?.('voice:join',{roomId,userId,name:participantName,muted:false});
+      addSysMsg("Bạn đã kết nối LiveKit — voice/video/screen share sẵn sàng.");
+      return;
+    }
+
+    // Fallback: local-only voice (LiveKit not configured)
+    if(lkResult===null){
+      addSysMsg("⚠ LiveKit chưa cấu hình. Dùng voice local (chỉ hiện trạng thái, không nghe được nhau).");
+    }
+
     let hasStream=false;
     try{
       const stream=await navigator.mediaDevices.getUserMedia({audio:true});
@@ -363,43 +745,41 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
         :"Không thể truy cập micro: "+e.message;
       setVoiceError(msg);
     }
-    // PTT mode: always start muted so user must hold key to speak
     const startMuted=!hasStream||(micModeRef.current==="ptt");
     if(hasStream&&micModeRef.current==="ptt"){
       streamRef.current.getAudioTracks().forEach(t=>{t.enabled=false;});
       setMuted(true); mutedRef.current=true;
     }
     setVoiceJoined(true);
-    const selfMember=room.members.find(m=>m.id==="self")||{id:"self",name:"Bạn"};
-    const others=room.members.filter(m=>m.id!=="self").slice(0,randInt(1,2));
-    setVoiceMembers([
-      {...selfMember,id:"self",name:"Bạn",muted:startMuted,speaking:false},
-      ...others.map(m=>({...m,muted:Math.random()>0.7,speaking:false}))
-    ]);
+    socketEmit?.('voice:join',{roomId,userId,name:participantName,muted:startMuted});
     const modeHint=micModeRef.current==="ptt"?` — PTT mode, giữ [${keybinds.pushToTalk}] để nói`:"";
     addSysMsg(hasStream?`Bạn đã tham gia kênh thoại${modeHint}.`:"Bạn đã tham gia kênh thoại (chỉ nghe).");
   };
 
   const leaveVoice=()=>{
     cleanupAudio();
+    if(lkConnected){ lkReset(); setLkConnected(false); }
     setVoiceJoined(false);
     setMuted(false);
     setDeafened(false);
     setSpeaking(false);
     setPttActive(false);
     pttActiveRef.current=false;
-    setVoiceMembers([]);
+    // Tell server — server removes us and broadcasts updated list to all
+    socketEmit?.('voice:leave',{roomId:room._id||room.id,userId});
     addSysMsg("Bạn đã rời kênh thoại.");
   };
 
   const toggleMute=()=>{
     const next=!muted;
     mutedRef.current=next;
-    if(!pttActiveRef.current){
-      if(streamRef.current) streamRef.current.getAudioTracks().forEach(t=>{t.enabled=!next;});
-    }
+    // Mute/unmute LiveKit track (fast, keeps track published)
+    if(lkControlsRef.current) lkControlsRef.current.setMicMuted(next);
+    // Fallback: local stream
+    if(!pttActiveRef.current&&streamRef.current) streamRef.current.getAudioTracks().forEach(t=>{t.enabled=!next;});
     setMuted(next);
     if(next) setSpeaking(false);
+    socketEmit?.('voice:state',{roomId:room._id||room.id,userId,muted:next,speaking:false});
   };
 
   const toggleDeafen=()=>{
@@ -417,35 +797,67 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   const addSysMsg=(text)=>setMsgs(p=>[...p,{id:Date.now()+Math.random(),sender:"Hệ thống",text,system:true,time:Date.now()}]);
 
   const send=()=>{
-    if(!input.trim()) return;
-    setMsgs(p=>[...p,{id:Date.now(),sender:"Bạn",text:input,time:Date.now()}]);
+    const raw=input.trim();
+    if(!raw) return;
+
+    // Universal /help command — hoạt động cho mọi game
+    if(isHelpCommand(raw)){
+      setMsgs(p=>[...p,{id:Date.now(),sender:"Hệ thống",system:true,text:buildHelpText(room?.game),time:Date.now()}]);
+      setInput("");
+      return;
+    }
+
+    // Dispatch slash command qua per-game router — pass mode vào context
+    const handler=getCommandHandler(room?.game);
+    if(handler){
+      const result=handler.parse(raw,{mode:room?.mode});
+      if(result){
+        if(result.matched){
+          setMsgs(p=>[...p,{id:Date.now(),sender:"Bạn",text:result.display,time:Date.now()}]);
+          setInput("");
+          return;
+        }
+        // Command sai cú pháp → system message
+        setMsgs(p=>[...p,{id:Date.now(),sender:"Hệ thống",system:true,text:result.error||"Command không hợp lệ. Gõ /help để xem danh sách.",time:Date.now()}]);
+        setInput("");
+        return;
+      }
+      // parse trả null → không phải command, fall through
+    }
+
+    // Gửi text bình thường — qua socket để broadcast cho tất cả
+    const roomId=room._id||room.id;
+    socketEmit?.('chat:message',{roomId,text:raw});
     setInput("");
-    setTimeout(()=>{
-      const m=pick(room.members.filter(m=>m.id!=="self"));
-      if(m) setMsgs(p=>[...p,{id:Date.now()+1,sender:m.name,text:pick(chatReplies),time:Date.now()}]);
-    },randInt(800,2500));
   };
 
-  const handleFiles=(e)=>{
-    Array.from(e.target.files).forEach(file=>{
-      const url=URL.createObjectURL(file);
-      setMsgs(p=>[...p,{
-        id:Date.now()+Math.random(),
-        sender:"Bạn",
-        type:file.type.startsWith("image/")?"image":file.type.startsWith("video/")?"video":"file",
-        src:url,
-        fileName:file.name,
-        fileSize:file.size,
-        time:Date.now(),
-      }]);
-    });
+  const handleFiles=async(e)=>{
+    const files=Array.from(e.target.files);
     e.target.value="";
+    const roomId=room._id||room.id;
+    const ids=[];
+    for(const file of files){
+      try{
+        const fd=new FormData();
+        fd.append('file',file);
+        fd.append('roomId',roomId);
+        const res=await apiClient.post('/api/upload',fd,{headers:{'Content-Type':'multipart/form-data'}});
+        const att=res.data?.data;
+        if(att?.id) ids.push(att.id);
+      }catch(err){
+        console.error('Upload failed:',err?.response?.data?.message||err.message);
+        try{ alert('Upload thất bại: '+(err?.response?.data?.message||err.message)); }catch{}
+      }
+    }
+    if(ids.length>0){
+      socketEmit?.('chat:message',{roomId,text:'',attachmentIds:ids});
+    }
   };
 
   // ── Slot movement ──────────────────────────────────────────────────────
   const moveSelf=(toIdx)=>{
     setSlots(prev=>{
-      const selfIdx=prev.findIndex(s=>s&&s.id==="self");
+      const selfIdx=prev.findIndex(s=>s&&isSelfId(s.id));
       if(selfIdx===-1||prev[toIdx]!==null) return prev;
       const next=[...prev];
       next[toIdx]=next[selfIdx];
@@ -453,46 +865,99 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
       return next;
     });
   };
-  const handleDragStart=(idx)=>{ if(slots[idx]?.id==="self") setDragFromSlot(idx); };
+  const handleDragStart=(idx)=>{ if(slots[idx]&&isSelfId(slots[idx].id)) setDragFromSlot(idx); };
   const handleDragEnd=()=>{ setDragFromSlot(null); setHoverSlot(null); };
   const handleDragOver=(e,idx)=>{ e.preventDefault(); if(slots[idx]===null) setHoverSlot(idx); };
   const handleDrop=(idx)=>{ if(slots[idx]===null) moveSelf(idx); setDragFromSlot(null); setHoverSlot(null); };
 
+  // Render text có URL → clickable link
+  const renderRichText=(text)=>{
+    if(!text) return null;
+    const urlRegex=/(https?:\/\/[^\s]+)/g;
+    const parts=String(text).split(urlRegex);
+    return parts.map((part,i)=>{
+      if(urlRegex.test(part)){
+        // reset lastIndex vì split + test có thể vướng state
+        urlRegex.lastIndex=0;
+        return(
+          <a key={i} href={part} target="_blank" rel="noopener noreferrer"
+            style={{color:"#5b9bd5",textDecoration:"underline",wordBreak:"break-all"}}
+            onClick={(e)=>e.stopPropagation()}>
+            {part}
+          </a>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
   // ── Render message ─────────────────────────────────────────────────────
   const renderMsg=(msg)=>{
-    if(msg.system) return(
-      <div key={msg.id} style={{textAlign:"center",marginBottom:10}}>
-        <span style={{
-          fontSize:11,color:"#c89b3c",fontStyle:"italic",fontWeight:500,
-          background:"#c89b3c0e",padding:"5px 18px",borderRadius:12,
-          display:"inline-block",border:"1px solid #c89b3c40",letterSpacing:0.3,
-        }}>◆ {msg.text}</span>
-      </div>
-    );
-    return(
-      <div key={msg.id} style={{marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4}}>
-          <span style={{fontSize:12,fontWeight:700,color:msg.sender==="Bạn"?"#c8aa6e":"#5b9bd5"}}>{msg.sender}</span>
-          <span style={{fontSize:10,color:"#333"}}>{new Date(msg.time).toLocaleTimeString("vi-VN",{hour:"2-digit",minute:"2-digit"})}</span>
-        </div>
-        {msg.type==="image"?(
-          <img src={msg.src} alt={msg.fileName}
-            onClick={()=>setLightbox(msg.src)}
-            style={{maxWidth:280,maxHeight:200,borderRadius:6,cursor:"zoom-in",border:"1px solid #222",objectFit:"contain",background:"#0a0a14",display:"block"}}/>
-        ):msg.type==="video"?(
-          <video src={msg.src} controls
-            style={{maxWidth:320,maxHeight:220,borderRadius:6,border:"1px solid #222",display:"block"}}/>
-        ):msg.type==="file"?(
-          <div style={{display:"inline-flex",alignItems:"center",gap:8,padding:"8px 12px",background:"#111",borderRadius:6,border:"1px solid #222"}}>
-            <span style={{fontSize:20}}>📎</span>
-            <div>
-              <div style={{color:"#c8aa6e",fontSize:12}}>{msg.fileName}</div>
-              <div style={{color:"#444",fontSize:10}}>{(msg.fileSize/1024).toFixed(1)} KB</div>
-            </div>
+    if(msg.system){
+      const isMultiline=String(msg.text||"").includes("\n");
+      if(isMultiline){
+        return(
+          <div key={msg.id} style={{marginBottom:14,display:"flex",justifyContent:"center"}}>
+            <pre style={{
+              maxWidth:"90%",fontSize:12,color:CYBER.cyan,
+              background:`${CYBER.bgCardAlt}cc`,
+              padding:"14px 20px",borderRadius:6,
+              border:`1px solid ${CYBER.cyan}40`,
+              boxShadow:`0 0 14px ${CYBER.cyan}18, inset 0 0 10px ${CYBER.cyan}08`,
+              whiteSpace:"pre-wrap",wordBreak:"break-word",textAlign:"left",
+              fontFamily:"'JetBrains Mono', monospace",
+              lineHeight:1.6,margin:0
+            }}>{msg.text}</pre>
           </div>
-        ):(
-          <div style={{color:"#a09b8c",fontSize:13,lineHeight:1.5}}>{msg.text}</div>
-        )}
+        );
+      }
+      return(
+        <div key={msg.id} style={{textAlign:"center",marginBottom:10}}>
+          <span style={{
+            fontSize:11,color:CYBER.cyan,fontStyle:"italic",fontWeight:500,
+            background:`${CYBER.cyan}10`,padding:"5px 18px",borderRadius:12,
+            display:"inline-block",border:`1px solid ${CYBER.cyan}40`,letterSpacing:0.3,
+          }}>◆ {msg.text}</span>
+        </div>
+      );
+    }
+    const isMe=msg.sender==="Bạn";
+    return(
+      <div key={msg.id} style={{display:"flex",gap:12,marginBottom:4,padding:"4px 0",
+        borderRadius:4,transition:"background .1s"}}
+        onMouseEnter={e=>e.currentTarget.style.background="#0d0d1a"}
+        onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+        {/* Avatar */}
+        <div onClick={()=>{ const uid=msg.senderId||msg.userId; if(uid && !isMe) setProfileUser(uid); }}
+          style={{width:40,height:40,borderRadius:"50%",flexShrink:0,
+          background:`linear-gradient(135deg,${isMe?CYBER.cyan+"30":"#2a2a3e"},${isMe?CYBER.cyan+"15":"#1e2328"})`,
+          border:`2px solid ${isMe?CYBER.cyan+"40":"#333"}`,
+          display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,marginTop:2,
+          cursor: isMe?"default":"pointer"
+        }}>👤</div>
+        {/* Content */}
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:2}}>
+            <span style={{fontSize:13,fontWeight:700,color:isMe?CYBER.cyan:"#f0f0f0"}}>{msg.sender}</span>
+            <span style={{fontSize:10,color:"#4a4a5a"}}>{new Date(msg.time).toLocaleTimeString("vi-VN",{hour:"2-digit",minute:"2-digit"})}</span>
+          </div>
+          {msg.type==="image"?(
+            <img src={msg.src} alt={msg.fileName} onClick={()=>setLightbox(msg.src)}
+              style={{maxWidth:320,maxHeight:240,borderRadius:8,cursor:"zoom-in",objectFit:"contain",display:"block",marginTop:4}}/>
+          ):msg.type==="video"?(
+            <video src={msg.src} controls style={{maxWidth:400,maxHeight:260,borderRadius:8,display:"block",marginTop:4}}/>
+          ):msg.type==="file"?(
+            <div style={{display:"inline-flex",alignItems:"center",gap:8,padding:"8px 12px",background:"#111",borderRadius:6,border:"1px solid #222",marginTop:4}}>
+              <span style={{fontSize:20}}>📎</span>
+              <div>
+                <div style={{color:"#c8aa6e",fontSize:12}}>{msg.fileName}</div>
+                <div style={{color:"#444",fontSize:10}}>{(msg.fileSize/1024).toFixed(1)} KB</div>
+              </div>
+            </div>
+          ):(
+            <div style={{color:"#dcddde",fontSize:14,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{renderRichText(msg.text)}</div>
+          )}
+        </div>
       </div>
     );
   };
@@ -510,114 +975,40 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
   return(
     <div style={{display:"flex",flexDirection:"column",height:"100vh"}}>
 
-      {/* ── Top bar ── */}
-      <div style={{padding:"12px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",
-        borderBottom:"1px solid #c89b3c25",background:"linear-gradient(180deg,#1a1a2e,#0d0d1a)",flexWrap:"wrap",gap:10,flexShrink:0}}>
-        <div style={{display:"flex",alignItems:"center",gap:14}}>
-          <div style={{fontFamily:"'Playfair Display',serif",fontSize:16,fontWeight:700,color:"#c8aa6e"}}>{room.name}</div>
-          <StatusDot status={room.status}/>
-          <span style={{fontSize:12,color:"#5b5a56",fontWeight:600}}>{room.members.length}/{room.maxPlayers}</span>
-          {room.requests.length>0&&isOwner&&(
-            <span style={{fontSize:11,padding:"2px 10px",borderRadius:10,background:"#c89b3c20",color:"#c89b3c",fontWeight:700}}>
-              {room.requests.length} yêu cầu mới
-            </span>
-          )}
-        </div>
+      {/* ── Top bar (Discord header style) ── */}
+      <div style={{height:48,padding:"0 16px",display:"flex",alignItems:"center",
+        borderBottom:`1px solid ${CYBER.border}`,
+        background:`${CYBER.bgCard}ee`,
+        backdropFilter:"blur(8px)",flexShrink:0,gap:12}}>
+        {onBackToLobby&&(
+          <button onClick={onBackToLobby}
+            style={{background:"none",border:"none",color:CYBER.textMuted,cursor:"pointer",fontSize:16,padding:"4px",display:"flex",alignItems:"center"}}
+            title="Quay lại lobby">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+        )}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={CYBER.textMuted} strokeWidth="2" strokeLinecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        <span style={{fontFamily:"'Be Vietnam Pro',sans-serif",fontSize:15,fontWeight:700,color:CYBER.textPrimary}}>{roomData.name}</span>
+        <StatusDot status={roomData.status}/>
+        <div style={{flex:1}}/>
+        <span style={{fontSize:10,color:CYBER.textMuted,fontFamily:"'JetBrains Mono',monospace",letterSpacing:1}}>
+          {roomData.current||roomData.members?.length||0}/{roomData.maxPlayers||roomData.slots}
+        </span>
+        {isOwner&&(
+          <GoldBtn variant="ghost" size="sm" onClick={()=>setShowEditRoom(true)}>Chỉnh sửa</GoldBtn>
+        )}
         <GoldBtn variant="danger" size="sm" onClick={onLeave}>{isOwner?"Đóng Phòng":"Rời Phòng"}</GoldBtn>
       </div>
+      <EditRoomModal isOpen={showEditRoom} onClose={()=>setShowEditRoom(false)}
+        room={roomData} onUpdated={(r)=>setRoomData(prev=>({...prev,...r}))}/>
+      <ProfileModal userId={profileUser} onClose={()=>setProfileUser(null)}/>
 
       <div style={{display:"flex",flex:1,overflow:"hidden"}}>
 
-        {/* ── Sidebar ── */}
-        <div style={{width:290,borderRight:"1px solid #1a1a2e",background:"#080814",overflowY:"auto",flexShrink:0,display:"flex",flexDirection:"column"}}>
+        {/* ══════ LEFT SIDEBAR — Channels (Discord-style) ══════ */}
+        <div style={{width:240,borderRight:`1px solid ${CYBER.border}`,background:"#080814",flexShrink:0,display:"flex",flexDirection:"column"}}>
 
-          {/* Members list */}
-          <div style={{padding:"16px 14px 12px"}}>
-            <div style={{fontSize:11,color:"#5b5a56",textTransform:"uppercase",letterSpacing:1.5,marginBottom:12,fontWeight:700}}>
-              Thành Viên ({room.members.length}/{room.maxPlayers})
-            </div>
-            {slots.map((m,i)=>{
-              if(m){
-                const inVoice=voiceMembers.find(v=>v.id===m.id);
-                const isSelf=m.id==="self";
-                return(
-                  <div key={m.id}
-                    draggable={isSelf}
-                    onDragStart={()=>handleDragStart(i)}
-                    onDragEnd={handleDragEnd}
-                    style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                      padding:"8px 10px",borderRadius:6,marginBottom:4,
-                      background:isSelf?"#c89b3c0a":"transparent",
-                      cursor:isSelf?"grab":"default",
-                      border:`1px solid ${isSelf&&dragFromSlot===i?"#c89b3c50":"transparent"}`,
-                      transition:"border-color .2s"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{position:"relative"}}>
-                        <div style={{
-                          width:34,height:34,borderRadius:"50%",
-                          background:"linear-gradient(135deg,#1e2328,#2a2a3e)",
-                          border:`2px solid ${inVoice?.speaking?"#3ba55d":isSelf?"#c89b3c":"#333"}`,
-                          display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,
-                          transition:"border-color .2s",
-                          boxShadow:inVoice?.speaking?"0 0 8px #3ba55d50":"",
-                        }}>👤</div>
-                        {inVoice&&(
-                          <div style={{
-                            position:"absolute",bottom:-2,right:-2,width:13,height:13,borderRadius:"50%",
-                            background:inVoice.speaking?"#3ba55d":inVoice.muted?"#f04747":"#43b581",
-                            border:"2px solid #080814",transition:"background .2s",
-                          }}/>
-                        )}
-                      </div>
-                      <div>
-                        <div style={{color:"#c8aa6e",fontSize:12,fontWeight:600}}>{isSelf?"Bạn":m.name}</div>
-                        <div style={{fontSize:10,color:"#5b5a56"}}>{POS_ICONS[m.position]} {m.position}</div>
-                      </div>
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <RankBadge rank={m.rank} size="sm"/>
-                      {isOwner&&!isSelf&&(
-                        <button onClick={()=>onKick(m.id)} style={{background:"none",border:"none",color:"#444",cursor:"pointer",fontSize:14,padding:"2px 4px"}} title="Kick">✕</button>
-                      )}
-                    </div>
-                  </div>
-                );
-              }
-              const isHov=hoverSlot===i;
-              const hasSelf=slots.some(s=>s&&s.id==="self");
-              return(
-                <div key={`e${i}`}
-                  onClick={()=>hasSelf&&moveSelf(i)}
-                  onMouseEnter={()=>hasSelf&&setHoverSlot(i)}
-                  onMouseLeave={()=>setHoverSlot(null)}
-                  onDragOver={(e)=>handleDragOver(e,i)}
-                  onDragLeave={()=>{ if(hoverSlot===i) setHoverSlot(null); }}
-                  onDrop={()=>handleDrop(i)}
-                  style={{
-                    display:"flex",alignItems:"center",gap:8,
-                    padding:"8px 10px",borderRadius:6,marginBottom:4,
-                    border:`2px dashed ${isHov?"#c89b3c70":"#252538"}`,
-                    background:isHov?"#c89b3c0c":"transparent",
-                    cursor:hasSelf?"pointer":"default",
-                    transition:"all .2s",
-                  }}>
-                  <div style={{
-                    width:34,height:34,borderRadius:"50%",flexShrink:0,
-                    border:`2px dashed ${isHov?"#c89b3c70":"#252538"}`,
-                    display:"flex",alignItems:"center",justifyContent:"center",
-                    fontSize:14,color:isHov?"#c89b3c":"#353550",
-                    transition:"all .2s",
-                  }}>{isHov?"→":"+"}</div>
-                  <span style={{
-                    color:isHov?"#c89b3c90":"#353550",fontSize:12,fontStyle:"italic",
-                    transition:"color .2s",
-                  }}>{hasSelf&&isHov?"Di chuyển đến đây":"Slot trống"}</span>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* ── Voice Channel (Discord-style) ── */}
+          {/* ── Voice Channel ── */}
           <div style={{borderTop:"1px solid #14141e",background:"#060610",flexShrink:0}}>
 
             {/* Channel header */}
@@ -673,8 +1064,44 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
               </div>
             )}
 
+            {/* Voice members — show to ALL users in room */}
+            {voiceMembers.length>0&&!voiceJoined&&(
+              <div style={{padding:"0 8px 4px"}}>
+                {dedupeVoice(voiceMembers).map(vm=>(
+                  <div key={vm.id} style={{
+                    display:"flex",alignItems:"center",gap:9,
+                    padding:"4px 8px",borderRadius:6,marginBottom:2,
+                    background:vm.speaking?"#0d2610":"transparent",
+                    transition:"background .15s",
+                  }}>
+                    <div style={{
+                      width:26,height:26,borderRadius:"50%",
+                      background:"linear-gradient(135deg,#1e2328,#2a2a3e)",
+                      border:`3px solid ${vm.speaking?"#3ba55d":"#252538"}`,
+                      boxShadow:vm.speaking?"0 0 0 3px #3ba55d60, 0 0 12px #3ba55d40":"none",
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,
+                      transition:"all .15s",
+                    }}>👤</div>
+                    <span style={{fontSize:11,color:vm.speaking?"#fff":"#96989d",transition:"color .15s"}}>{vm.name}</span>
+                    {vm.muted&&!vm.speaking&&(
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f04747" strokeWidth="2.5" strokeLinecap="round">
+                        <line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
+                      </svg>
+                    )}
+                    {vm.speaking&&(
+                      <div style={{display:"flex",gap:2,alignItems:"flex-end",height:12}}>
+                        {[3,5,4].map((h,i)=>(
+                          <div key={i} style={{width:2.5,height:h,borderRadius:2,background:"#3ba55d",
+                            animation:`voiceBar${i} 0.6s ease-in-out infinite alternate`}}/>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {!voiceJoined?(
-              /* Join button */
               <div style={{padding:"4px 12px 14px"}}>
                 <button onClick={joinVoice}
                   style={{
@@ -692,27 +1119,29 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
               <>
                 {/* Voice member rows */}
                 <div style={{padding:"0 8px 6px"}}>
-                  {voiceMembers.map(vm=>{
-                    const isSelf=vm.id==="self";
+                  {dedupeVoice(voiceMembers).map(vm=>{
+                    const isSelf=isSelfId(vm.id);
                     const isActivePtt=isSelf&&pttActive;
-                    const effectiveSpeaking=isSelf?(pttActive||vm.speaking):vm.speaking;
+                    const effectiveSpeaking=isSelf?isSpeaking:vm.speaking;
+                    const vol=userVolumes[vm.id]??100;
                     return(
                       <div key={vm.id} style={{
                         display:"flex",alignItems:"center",gap:9,
                         padding:"5px 8px",borderRadius:6,marginBottom:2,
                         background:effectiveSpeaking?"#0d2610":isSelf?"#c89b3c08":"transparent",
                         border:`1px solid ${effectiveSpeaking?"#3ba55d25":"transparent"}`,
-                        transition:"all .25s",
-                      }}>
+                        transition:"all .25s",cursor:!isSelf?"pointer":"default",position:"relative",
+                      }}
+                      onClick={()=>!isSelf&&setVolumePopup(volumePopup===vm.id?null:vm.id)}>
                         {/* Avatar */}
                         <div style={{position:"relative",flexShrink:0}}>
                           <div style={{
                             width:30,height:30,borderRadius:"50%",
                             background:"linear-gradient(135deg,#1e2328,#2a2a3e)",
-                            border:`2px solid ${effectiveSpeaking?"#3ba55d":isSelf?"#c89b3c40":"#252538"}`,
+                            border:`3px solid ${effectiveSpeaking?"#3ba55d":isSelf?"#c89b3c40":"#252538"}`,
                             display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,
-                            boxShadow:effectiveSpeaking?"0 0 0 2px #3ba55d50":"none",
-                            transition:"all .25s",
+                            boxShadow:effectiveSpeaking?"0 0 0 3px #3ba55d60, 0 0 12px #3ba55d40":"none",
+                            transition:"all .15s",
                           }}>👤</div>
                           {/* Muted badge */}
                           {vm.muted&&!isActivePtt&&(
@@ -770,212 +1199,389 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
                             </div>
                           )}
                         </div>
+
+                        {/* Volume popup for this user */}
+                        {!isSelf&&volumePopup===vm.id&&(
+                          <div onClick={e=>e.stopPropagation()} style={{
+                            position:"absolute",left:0,right:0,top:"100%",zIndex:10,
+                            padding:"8px 10px",background:"#1a1a2e",borderRadius:6,
+                            border:"1px solid #2a2a45",boxShadow:"0 4px 12px rgba(0,0,0,.5)",
+                            marginTop:2,
+                          }}>
+                            <div style={{fontSize:9,color:"#72767d",marginBottom:4,textTransform:"uppercase",letterSpacing:1}}>
+                              Âm lượng — {vol}%
+                            </div>
+                            <input type="range" min={0} max={200} value={vol}
+                              onChange={e=>{
+                                const v=Number(e.target.value);
+                                setUserVolumes(p=>({...p,[vm.id]:v}));
+                                if(lkControlsRef.current) lkControlsRef.current.setUserVolume(vm.id,v/100);
+                              }}
+                              style={{width:"100%",accentColor:"#3ba55d",height:4,cursor:"pointer"}}/>
+                            <div style={{display:"flex",justifyContent:"space-between",fontSize:8,color:"#555",marginTop:2}}>
+                              <span>0%</span><span>100%</span><span>200%</span>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
                 </div>
 
-                {/* PTT hint bar */}
-                {pttActive&&(
-                  <div style={{
-                    margin:"0 8px 6px",padding:"5px 10px",
-                    background:"#3ba55d18",border:"1px solid #3ba55d40",borderRadius:5,
-                    display:"flex",alignItems:"center",gap:6,
-                  }}>
-                    <div style={{width:8,height:8,borderRadius:"50%",background:"#3ba55d",flexShrink:0,animation:"pulse 0.8s ease-in-out infinite"}}/>
-                    <span style={{fontSize:10,color:"#3ba55d",fontWeight:600}}>Đang phát - nhả [{kbdLabel(keybinds.pushToTalk)}] để dừng</span>
-                  </div>
-                )}
-
-                {/* Discord-style control bar */}
-                <div style={{
-                  margin:"4px 8px 12px",padding:"6px 10px",
-                  background:"#0d0d18",border:"1px solid #1a1a2e",borderRadius:8,
-                  display:"flex",alignItems:"center",gap:4,
-                }}>
-                  {/* Keybind hints */}
-                  <div style={{flex:1,display:"flex",gap:8}}>
-                    <span style={{
-                      fontSize:9,color:"#3a3a55",display:"flex",alignItems:"center",gap:3,
-                    }}>
-                      <span style={{
-                        padding:"1px 4px",background:"#141420",border:"1px solid #252540",
-                        borderRadius:3,color:"#555",fontSize:9,lineHeight:1.4,fontFamily:"monospace",
-                      }}>{kbdLabel(keybinds.pushToTalk)}</span>
-                      <span style={{color:"#3a3a55"}}>PTT</span>
-                    </span>
-                    <span style={{
-                      fontSize:9,color:"#3a3a55",display:"flex",alignItems:"center",gap:3,
-                    }}>
-                      <span style={{
-                        padding:"1px 4px",background:"#141420",border:"1px solid #252540",
-                        borderRadius:3,color:"#555",fontSize:9,lineHeight:1.4,fontFamily:"monospace",
-                      }}>{kbdLabel(keybinds.mute)}</span>
-                      <span style={{color:"#3a3a55"}}>Mute</span>
-                    </span>
-                  </div>
-
-                  {/* Mic button */}
-                  <button
-                    onClick={toggleMute}
-                    title={`${muted?"Bật":"Tắt"} mic [${kbdLabel(keybinds.mute)}]`}
-                    style={{
-                      width:32,height:32,borderRadius:6,cursor:"pointer",
-                      background:muted?"#f0474720":"#1a2438",
-                      border:`1px solid ${muted?"#f04747":"#2a3a55"}`,
-                      color:muted?"#f04747":"#7ec8e3",
-                      display:"flex",alignItems:"center",justifyContent:"center",
-                      transition:"all .2s",fontSize:15,flexShrink:0,
-                    }}
-                    onMouseOver={e=>{e.currentTarget.style.background=muted?"#f0474730":"#1e2e4a";}}
-                    onMouseOut={e=>{e.currentTarget.style.background=muted?"#f0474720":"#1a2438";}}
-                  >
-                    {muted?
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
-                        <path d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v4M8 23h8"/>
-                      </svg>:
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/>
+                {/* ── Discord Voice Connected panel ── */}
+                <div style={{background:"#1a2c1a",margin:"4px 8px 8px",borderRadius:6,overflow:"hidden"}}>
+                  {/* Top: Voice Connected + icons */}
+                  <div style={{padding:"8px 10px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                        <path d="M2 16.5C2 12.36 5.36 9 9.5 9H10v2H9.5C6.46 11 4 13.46 4 16.5S6.46 22 9.5 22h1v2h-1C5.36 24 2 20.64 2 16.5z" fill="#3ba55d"/>
+                        <path d="M6 16.5c0-2.49 2.01-4.5 4.5-4.5H11v1.5h-.5c-1.66 0-3 1.34-3 3s1.34 3 3 3h.5V21h-.5c-2.49 0-4.5-2.01-4.5-4.5z" fill="#3ba55d"/>
+                        <circle cx="12" cy="16.5" r="2" fill="#3ba55d"/>
                       </svg>
-                    }
-                  </button>
-
-                  {/* Headphones / Deafen button */}
-                  <button
-                    onClick={toggleDeafen}
-                    title={deafened?"Bỏ điếc tai nghe":"Tắt tai nghe"}
-                    style={{
-                      width:32,height:32,borderRadius:6,cursor:"pointer",
-                      background:deafened?"#f0474720":"#14141e",
-                      border:`1px solid ${deafened?"#f04747":"#1e1e2e"}`,
-                      color:deafened?"#f04747":"#72767d",
-                      display:"flex",alignItems:"center",justifyContent:"center",
-                      transition:"all .2s",fontSize:15,flexShrink:0,
+                      <div>
+                        <div style={{fontSize:12,fontWeight:700,color:"#3ba55d"}}>Voice Connected</div>
+                        <div style={{fontSize:10,color:"#7a9a7e"}}>{room.name} / Kênh Thoại</div>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:4}}>
+                      {/* Signal bars */}
+                      <div style={{display:"flex",gap:1,alignItems:"flex-end",height:16,padding:"0 4px"}}>
+                        {[4,7,10,14].map((h,i)=>(
+                          <div key={i} style={{width:3,height:h,borderRadius:1,background:"#3ba55d"}}/>
+                        ))}
+                      </div>
+                      {/* Disconnect */}
+                      <button onClick={leaveVoice} title="Ngắt kết nối"
+                        style={{background:"none",border:"none",cursor:"pointer",color:"#b9bbbe",padding:4,display:"flex",borderRadius:4,transition:"all .15s"}}
+                        onMouseOver={e=>{e.currentTarget.style.background="#f0474720";e.currentTarget.style.color="#f04747";}}
+                        onMouseOut={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color="#b9bbbe";}}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 00-7.35 16.76l1.42-1.42A8 8 0 1120 12h-2a6 6 0 10-6 6v2A8 8 0 0012 2z"/><path d="M15 12l-3 3-3-3h2V8h2v4h2z" transform="rotate(90,12,12)"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                  {/* Action buttons row (like Discord) */}
+                  <div style={{padding:"6px 8px",display:"flex",gap:4}}>
+                    {/* Screen Share */}
+                    <button onClick={async()=>{
+                      if(lkControlsRef.current){
+                        const next=!screenSharing;
+                        await lkControlsRef.current.setScreenShareEnabled(next);
+                        setScreenSharing(next);
+                      }
                     }}
-                    onMouseOver={e=>{e.currentTarget.style.color=deafened?"#ff6b6b":"#96989d";}}
-                    onMouseOut={e=>{e.currentTarget.style.color=deafened?"#f04747":"#72767d";}}
-                  >
-                    {deafened?
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <line x1="1" y1="1" x2="23" y2="23"/>
-                        <path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/>
-                      </svg>:
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/>
+                      title={screenSharing?"Dừng chia sẻ":"Chia sẻ màn hình"}
+                      style={{flex:1,padding:"6px",borderRadius:4,cursor:"pointer",
+                        background:screenSharing?"#3ba55d20":"#1a2a1a",
+                        border:`1px solid ${screenSharing?"#3ba55d":"#2a4a2a"}`,
+                        color:screenSharing?"#3ba55d":"#7a9a7e",fontSize:10,fontWeight:600,
+                        display:"flex",alignItems:"center",justifyContent:"center",gap:4,transition:"all .2s"
+                      }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
                       </svg>
-                    }
-                  </button>
-
-                  {/* Noise Suppression button */}
-                  <button
-                    onClick={()=>applyNs(!nsEnabled,nsLevel)}
-                    title={`Giảm tiếng ồn${nsEnabled?` [${nsLevel==="low"?"Thấp":nsLevel==="medium"?"Vừa":"Cao"}] — Tắt`:"— Bật"}`}
-                    style={{
-                      width:32,height:32,borderRadius:6,cursor:"pointer",
-                      background:nsEnabled?"#5865f220":"#14141e",
-                      border:`1px solid ${nsEnabled?"#5865f2":"#1e1e2e"}`,
-                      color:nsEnabled?"#7289da":"#72767d",
-                      display:"flex",alignItems:"center",justifyContent:"center",
-                      transition:"all .2s",flexShrink:0,
-                      boxShadow:nsEnabled?"0 0 8px #5865f240":"none",
-                      position:"relative",
+                      Screen
+                    </button>
+                    {/* Camera */}
+                    <button onClick={async()=>{
+                      if(lkControlsRef.current){
+                        const next=!cameraOn;
+                        await lkControlsRef.current.setCameraEnabled(next);
+                        setCameraOn(next);
+                      }
                     }}
-                    onMouseOver={e=>{e.currentTarget.style.color=nsEnabled?"#99aab5":"#96989d";}}
-                    onMouseOut={e=>{e.currentTarget.style.color=nsEnabled?"#7289da":"#72767d";}}
-                  >
-                    {/* Filter / waveform icon */}
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="4" y1="6" x2="20" y2="6"/>
-                      <line x1="7" y1="12" x2="17" y2="12"/>
-                      <line x1="10" y1="18" x2="14" y2="18"/>
-                    </svg>
-                    {nsEnabled&&(
-                      <span style={{
-                        position:"absolute",top:-4,right:-4,
-                        width:8,height:8,borderRadius:"50%",
-                        background:nsLevel==="high"?"#3ba55d":nsLevel==="medium"?"#5865f2":"#faa61a",
-                        border:"1.5px solid #060610",
-                        display:"block",
-                      }}/>
-                    )}
-                  </button>
-
-                  {/* Disconnect button */}
-                  <button
-                    onClick={leaveVoice}
-                    title="Ngắt kết nối"
-                    style={{
-                      width:32,height:32,borderRadius:6,cursor:"pointer",
-                      background:"#2a1010",border:"1px solid #3a1515",
-                      color:"#f04747",
-                      display:"flex",alignItems:"center",justifyContent:"center",
-                      transition:"all .2s",flexShrink:0,
-                    }}
-                    onMouseOver={e=>{e.currentTarget.style.background="#3a1515";e.currentTarget.style.borderColor="#f04747";}}
-                    onMouseOut={e=>{e.currentTarget.style.background="#2a1010";e.currentTarget.style.borderColor="#3a1515";}}
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M2.6 8.9C6.3 5.2 11.4 3 17 3s10.7 2.2 14.4 5.9l-2.8 2.8c-3-3-7.1-4.7-11.6-4.7S8.4 8.7 5.4 11.7L2.6 8.9z" transform="scale(0.65) translate(1,1)"/>
-                      <path d="M12 15l-3-3 3-3 3 3-3 3z" transform="translate(0,2)"/>
-                      <line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-                    </svg>
-                  </button>
+                      title={cameraOn?"Tắt camera":"Bật camera"}
+                      style={{flex:1,padding:"6px",borderRadius:4,cursor:"pointer",
+                        background:cameraOn?"#3ba55d20":"#1a2a1a",
+                        border:`1px solid ${cameraOn?"#3ba55d":"#2a4a2a"}`,
+                        color:cameraOn?"#3ba55d":"#7a9a7e",fontSize:10,fontWeight:600,
+                        display:"flex",alignItems:"center",justifyContent:"center",gap:4,transition:"all .2s"
+                      }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+                      </svg>
+                      Video
+                    </button>
+                  </div>
+                  {/* Mic level bar */}
+                  <div style={{height:3,background:"#0d3320"}}>
+                    <div style={{height:"100%",width:`${micLevel}%`,background:micLevel>50?"#faa61a":"#3ba55d",transition:"width .08s linear",borderRadius:"0 2px 2px 0"}}/>
+                  </div>
                 </div>
               </>
             )}
           </div>
 
-          {/* Join requests */}
-          {isOwner&&room.requests.length>0&&(
-            <div style={{padding:"0 14px 16px",borderTop:"1px solid #1a1a2e"}}>
-              <div style={{fontSize:11,color:"#c89b3c",textTransform:"uppercase",letterSpacing:1.5,marginBottom:12,fontWeight:700,paddingTop:12}}>
-                Yêu Cầu Tham Gia ({room.requests.length})
+          {/* Spacer */}
+          <div style={{flex:1}}/>
+
+          {/* ── Mic Input Gain (when in voice) ── */}
+          {voiceJoined&&(
+            <div style={{padding:"6px 10px",borderTop:`1px solid ${CYBER.border}20`,background:"#060610"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#72767d" strokeWidth="2" strokeLinecap="round">
+                  <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                </svg>
+                <span style={{fontSize:9,color:"#72767d",textTransform:"uppercase",letterSpacing:1,flex:1}}>Mic Input</span>
+                <span style={{fontSize:9,color:CYBER.cyan,fontWeight:700}}>{micGain}%</span>
               </div>
-              {room.requests.map(req=>(
-                <div key={req.id} style={{padding:12,background:"#c89b3c08",border:"1px solid #c89b3c20",borderRadius:8,marginBottom:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                    <span style={{color:"#c8aa6e",fontSize:12,fontWeight:700}}>{req.name}</span>
-                    <RankBadge rank={req.rank} size="sm"/>
-                  </div>
-                  <div style={{fontSize:10,color:"#5b5a56",marginBottom:4}}>{POS_ICONS[req.position]} {req.position} • {req.style}</div>
-                  {req.note&&<div style={{fontSize:11,color:"#8b8072",fontStyle:"italic",marginBottom:8,lineHeight:1.4}}>"{req.note}"</div>}
-                  <div style={{display:"flex",gap:6}}>
-                    <GoldBtn size="sm" onClick={()=>onAccept(req.id)}>Chấp nhận</GoldBtn>
-                    <GoldBtn variant="danger" size="sm" onClick={()=>onReject(req.id)}>Từ chối</GoldBtn>
-                  </div>
-                </div>
-              ))}
+              <input type="range" min={0} max={200} value={micGain}
+                onChange={e=>{
+                  const v=Number(e.target.value);
+                  setMicGain(v);
+                  // Apply gain via LiveKit track
+                  if(lkControlsRef.current){
+                    const pub=lkControlsRef.current.getRoom?.()?.localParticipant?.getTrackPublication?.('microphone');
+                    const track=pub?.track?.mediaStreamTrack;
+                    if(track){
+                      // Use audio constraint or Web Audio gain
+                    }
+                  }
+                }}
+                style={{width:"100%",accentColor:CYBER.cyan,height:3,cursor:"pointer"}}/>
             </div>
           )}
+
+          {/* ── User Panel (Discord bottom-left) ── */}
+          <div style={{
+            padding:"8px 10px",borderTop:`1px solid ${CYBER.border}`,
+            background:"#060610",display:"flex",alignItems:"center",gap:8,flexShrink:0
+          }}>
+            <div style={{width:32,height:32,borderRadius:"50%",flexShrink:0,
+              background:`linear-gradient(135deg,${CYBER.cyan}20,#1e2328)`,
+              border:`2px solid ${CYBER.cyan}40`,
+              display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,position:"relative"
+            }}>
+              👤
+              <div style={{position:"absolute",bottom:-1,right:-1,width:10,height:10,borderRadius:"50%",
+                background:voiceJoined?"#3ba55d":"#43b581",border:"2px solid #060610"}}/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:700,color:CYBER.textPrimary,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>Bạn</div>
+              <div style={{fontSize:9,color:CYBER.textMuted}}>#{String(userId||"").slice(-4)}</div>
+            </div>
+            {voiceJoined&&(
+              <div style={{display:"flex",gap:2}}>
+                <button onClick={toggleMute} title={muted?"Bật mic":"Tắt mic"}
+                  style={{width:28,height:28,borderRadius:4,background:"transparent",border:"none",cursor:"pointer",
+                    color:muted?"#f04747":"#b9bbbe",display:"flex",alignItems:"center",justifyContent:"center",transition:"color .2s"}}
+                  onMouseOver={e=>e.currentTarget.style.color="#fff"} onMouseOut={e=>e.currentTarget.style.color=muted?"#f04747":"#b9bbbe"}>
+                  {muted?
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/>
+                      <path d="M17 16.95A7 7 0 015 12v-2m14 0v2c0 .3-.01.6-.04.9M12 19v4M8 23h8"/>
+                    </svg>:
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/>
+                    </svg>
+                  }
+                </button>
+                <button onClick={toggleDeafen} title={deafened?"Bỏ điếc":"Tắt tai nghe"}
+                  style={{width:28,height:28,borderRadius:4,background:"transparent",border:"none",cursor:"pointer",
+                    color:deafened?"#f04747":"#b9bbbe",display:"flex",alignItems:"center",justifyContent:"center",transition:"color .2s"}}
+                  onMouseOver={e=>e.currentTarget.style.color="#fff"} onMouseOut={e=>e.currentTarget.style.color=deafened?"#f04747":"#b9bbbe"}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/>
+                    {deafened&&<line x1="1" y1="1" x2="23" y2="23"/>}
+                  </svg>
+                </button>
+                <button onClick={()=>setShowVoiceSettings(true)} title="Cài đặt"
+                  style={{width:28,height:28,borderRadius:4,background:"transparent",border:"none",cursor:"pointer",
+                    color:"#b9bbbe",display:"flex",alignItems:"center",justifyContent:"center",transition:"color .2s"}}
+                  onMouseOver={e=>e.currentTarget.style.color="#fff"} onMouseOut={e=>e.currentTarget.style.color="#b9bbbe"}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+                  </svg>
+                </button>
+              </div>
+            )}
+          </div>
+
         </div>
 
-        {/* ── Chat area ── */}
-        <div style={{flex:1,display:"flex",flexDirection:"column",background:"#0b0b18"}}>
+        {/* ══════ CENTER — Video + Chat ══════ */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",background:"#0b0b18",overflow:"hidden"}}>
+          {/* LiveKit — resizable video area */}
+          {lkConnected&&lkToken&&lkUrl&&(
+            <>
+              <div style={{
+                flexShrink:0,background:"#060610",overflow:"hidden",
+                height:(cameraOn||screenSharing||remoteTrackCount>0)?videoHeight:0,
+                transition:"height .3s",
+              }}>
+                <LiveKitRoom
+                  token={lkToken}
+                  serverUrl={lkUrl}
+                  onDisconnect={leaveVoice}
+                  onTracksChanged={setRemoteTrackCount}
+                  onSpeakingChange={(sp)=>{
+                    setSpeaking(sp);
+                    setMicLevel(sp?60:0);
+                  }}
+                  onReady={(controls)=>{
+                    lkControlsRef.current=controls;
+                    if(micModeRef.current==="ptt") setTimeout(()=>controls.setMicMuted(true),500);
+                  }}
+                />
+              </div>
+              {/* Drag handle to resize */}
+              {(cameraOn||screenSharing||remoteTrackCount>0)&&(
+                <div
+                  onMouseDown={e=>{
+                    e.preventDefault();
+                    const startY=e.clientY;
+                    const startH=videoHeight;
+                    const onMove=ev=>{
+                      const delta=ev.clientY-startY;
+                      setVideoHeight(Math.max(80,Math.min(window.innerHeight*0.85,startH+delta)));
+                    };
+                    const onUp=()=>{
+                      window.removeEventListener("mousemove",onMove);
+                      window.removeEventListener("mouseup",onUp);
+                    };
+                    window.addEventListener("mousemove",onMove);
+                    window.addEventListener("mouseup",onUp);
+                  }}
+                  style={{
+                    height:6,cursor:"row-resize",flexShrink:0,
+                    background:`linear-gradient(90deg,transparent,${CYBER.cyan}30,transparent)`,
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    transition:"background .2s",
+                  }}
+                  onMouseOver={e=>e.currentTarget.style.background=`linear-gradient(90deg,transparent,${CYBER.cyan}60,transparent)`}
+                  onMouseOut={e=>e.currentTarget.style.background=`linear-gradient(90deg,transparent,${CYBER.cyan}30,transparent)`}
+                >
+                  <div style={{width:40,height:3,borderRadius:2,background:`${CYBER.cyan}50`}}/>
+                </div>
+              )}
+            </>
+          )}
           <div style={{flex:1,overflowY:"auto",padding:"14px 18px"}}>
             {msgs.map(renderMsg)}
             <div ref={chatEnd}/>
           </div>
-
-          {/* Input bar */}
-          <div style={{padding:"10px 18px 14px",borderTop:"1px solid #1a1a2e",background:"#0a0a14"}}>
+          {typingUsers.length>0&&(
+            <div style={{padding:"2px 18px",fontSize:11,color:CYBER.textMuted,fontStyle:"italic",background:"#0a0a14"}}>
+              {typingUsers.map(u=>u.name||'Người chơi').slice(0,3).join(', ')} đang nhập…
+            </div>
+          )}
+          <div style={{padding:"10px 18px 14px",borderTop:`1px solid ${CYBER.border}`,background:"#0a0a14"}}>
             <div style={{display:"flex",alignItems:"center",gap:6,background:"#111520",borderRadius:8,border:"1px solid #1e1e30",padding:"2px 8px 2px 2px"}}>
               <input ref={fileInputRef} type="file" multiple accept="image/*,video/*" onChange={handleFiles} style={{display:"none"}}/>
-              <button onClick={()=>fileInputRef.current?.click()}
-                title="Đính kèm ảnh / video"
-                style={{width:36,height:36,borderRadius:6,background:"transparent",border:"none",
-                  cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",
-                  color:"#555",transition:"color .2s",flexShrink:0}}
-                onMouseOver={e=>e.currentTarget.style.color="#c8aa6e"}
-                onMouseOut={e=>e.currentTarget.style.color="#555"}>
-                📎
-              </button>
-              <input value={input} onChange={e=>setInput(e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&send()}
-                placeholder="Nhập tin nhắn..."
+              <button onClick={()=>fileInputRef.current?.click()} title="Đính kèm"
+                style={{width:36,height:36,borderRadius:6,background:"transparent",border:"none",cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",color:"#555",transition:"color .2s",flexShrink:0}}
+                onMouseOver={e=>e.currentTarget.style.color="#c8aa6e"} onMouseOut={e=>e.currentTarget.style.color="#555"}>📎</button>
+              <input value={input}
+                onChange={e=>{ setInput(e.target.value); if(e.target.value) notifyTyping(); else cancelTyping(); }}
+                onBlur={cancelTyping}
+                onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&(cancelTyping(),send())}
+                placeholder={getPlaceholder(room?.game)}
                 style={{flex:1,padding:"8px 4px",background:"transparent",border:"none",color:"#c8aa6e",fontSize:13,outline:"none"}}/>
               <GoldBtn onClick={send} size="sm">Gửi</GoldBtn>
             </div>
+          </div>
+        </div>
+
+        {/* ══════ RIGHT SIDEBAR — Members (Discord-style) ══════ */}
+        <div style={{width:240,borderLeft:`1px solid ${CYBER.border}`,background:"#080814",overflowY:"auto",flexShrink:0}}>
+          <div style={{padding:"16px 12px 8px"}}>
+            {isOwner&&(roomData?.isPersistent||room?.isPersistent)&&(
+              <div style={{marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${CYBER.border}`}}>
+                <div style={{fontSize:10,color:CYBER.gold||"#f0b132",textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,marginBottom:8,
+                  fontFamily:"'JetBrains Mono',monospace",display:"flex",alignItems:"center",gap:6}}>
+                  ⏳ Yêu Cầu Vào Nhóm
+                  {pendingList.length>0&&(
+                    <span style={{background:CYBER.gold||"#f0b132",color:"#000",borderRadius:8,padding:"1px 6px",fontSize:9}}>{pendingList.length}</span>
+                  )}
+                </div>
+                {pendingList.length===0?(
+                  <div style={{fontSize:10,color:CYBER.textMuted,fontStyle:"italic"}}>Không có yêu cầu nào</div>
+                ):pendingList.map(p=>{
+                  const pid=p._id||p.id;
+                  return(
+                    <div key={pid} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 4px",marginBottom:4,
+                      background:"#0f0f1a",borderRadius:4,border:`1px solid ${CYBER.border}`}}>
+                      <div style={{width:26,height:26,borderRadius:"50%",background:"linear-gradient(135deg,#1e2328,#2a2a3e)",
+                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,flexShrink:0,overflow:"hidden"}}>
+                        {p.avatar?<img src={p.avatar} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:"👤"}
+                      </div>
+                      <div style={{flex:1,minWidth:0,color:"#dcddde",fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {p.username||"User"}
+                      </div>
+                      <button onClick={()=>approvePending(pid)} title="Duyệt"
+                        style={{background:"#3ba55d",border:"none",color:"#fff",cursor:"pointer",fontSize:11,
+                          padding:"3px 6px",borderRadius:3,fontWeight:700}}>✓</button>
+                      <button onClick={()=>rejectPending(pid)} title="Từ chối"
+                        style={{background:"#ed4245",border:"none",color:"#fff",cursor:"pointer",fontSize:11,
+                          padding:"3px 6px",borderRadius:3,fontWeight:700}}>✕</button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{fontSize:10,color:CYBER.textMuted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,marginBottom:10,
+              fontFamily:"'JetBrains Mono',monospace"}}>
+              Thành Viên — {room.members?.length||0}/{room.maxPlayers}
+            </div>
+            {slots.map((m,i)=>{
+              if(m){
+                const inVoice=voiceMembers.find(v=>String(v.id)===String(m.id));
+                const isSelf=isSelfId(m.id);
+                return(
+                  <div key={m.id}
+                    draggable={isSelf} onDragStart={()=>handleDragStart(i)} onDragEnd={handleDragEnd}
+                    style={{display:"flex",alignItems:"center",gap:8,
+                      padding:"6px 8px",borderRadius:6,marginBottom:2,
+                      background:isSelf?`${CYBER.cyan}08`:"transparent",
+                      cursor:isSelf?"grab":"default",
+                      border:`1px solid ${isSelf&&dragFromSlot===i?`${CYBER.cyan}40`:"transparent"}`,
+                      transition:"all .2s"}}>
+                    <div style={{position:"relative",flexShrink:0}}>
+                      <div style={{
+                        width:32,height:32,borderRadius:"50%",
+                        background:"linear-gradient(135deg,#1e2328,#2a2a3e)",
+                        border:`2px solid ${inVoice?.speaking?"#3ba55d":isSelf?`${CYBER.cyan}60`:"#252538"}`,
+                        display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,
+                        boxShadow:inVoice?.speaking?"0 0 6px #3ba55d40":"none",
+                      }}>👤</div>
+                      {/* Online dot */}
+                      <div style={{position:"absolute",bottom:-1,right:-1,width:10,height:10,borderRadius:"50%",
+                        background:inVoice?"#3ba55d":"#43b581",border:"2px solid #080814"}}/>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{color:isSelf?CYBER.cyan:"#dcddde",fontSize:12,fontWeight:isSelf?700:400,
+                        overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isSelf?"Bạn":m.name}</div>
+                      {m.position&&<div style={{fontSize:9,color:CYBER.textMuted}}>{m.position}</div>}
+                    </div>
+                    {isOwner&&!isSelf&&(
+                      <button onClick={()=>onKick(m.id)} style={{background:"none",border:"none",color:"#444",cursor:"pointer",fontSize:12,padding:"2px"}} title="Kick">✕</button>
+                    )}
+                  </div>
+                );
+              }
+              const isHov=hoverSlot===i;
+              const hasSelf=slots.some(s=>s&&isSelfId(s.id));
+              return(
+                <div key={`e${i}`}
+                  onClick={()=>hasSelf&&moveSelf(i)}
+                  onMouseEnter={()=>hasSelf&&setHoverSlot(i)}
+                  onMouseLeave={()=>setHoverSlot(null)}
+                  onDragOver={(e)=>handleDragOver(e,i)}
+                  onDragLeave={()=>{if(hoverSlot===i)setHoverSlot(null);}}
+                  onDrop={()=>handleDrop(i)}
+                  style={{display:"flex",alignItems:"center",gap:8,
+                    padding:"6px 8px",borderRadius:6,marginBottom:2,
+                    border:`1px dashed ${isHov?`${CYBER.cyan}50`:"#1a1a2e"}`,
+                    background:isHov?`${CYBER.cyan}08`:"transparent",
+                    cursor:hasSelf?"pointer":"default",transition:"all .2s"}}>
+                  <div style={{width:32,height:32,borderRadius:"50%",flexShrink:0,
+                    border:`1px dashed ${isHov?`${CYBER.cyan}50`:"#252538"}`,
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:12,color:isHov?CYBER.cyan:"#353550"}}>{isHov?"→":"+"}</div>
+                  <span style={{color:isHov?`${CYBER.cyan}90`:"#353550",fontSize:11,fontStyle:"italic"}}>
+                    {hasSelf&&isHov?"Di chuyển":"Slot trống"}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -1029,7 +1635,16 @@ function RoomView({room,onLeave,onAccept,onReject,onKick,isOwner}){
             {/* Modal body */}
             <div style={{padding:"20px",overflowY:"auto",maxHeight:"calc(90vh - 70px)"}}>
 
-              {/* Section label */}
+              {/* ── Mic Test (Discord-style) ── */}
+              <div style={{marginBottom:20,padding:14,background:"#0d0d1a",borderRadius:8,border:"1px solid #1e1e30"}}>
+                <div style={{fontSize:10,color:"#5b5a56",textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,marginBottom:10}}>
+                  Mic Test
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <MicTestBtn/>
+                </div>
+              </div>
+
               {/* ── Mic Mode selector ── */}
               <div style={{marginBottom:20}}>
                 <div style={{

@@ -23,8 +23,36 @@ class RoomService {
       throw new Error('Owner not found');
     }
 
+    // Giới hạn: mỗi tài khoản chỉ có thể làm chủ 1 phòng đang mở
+    const existing = await this.roomRepository.findActiveByOwner(ownerId);
+    if (existing) {
+      const err = new Error('Bạn đã có 1 phòng đang mở. Hãy đóng phòng cũ trước khi tạo phòng mới.');
+      err.statusCode = 409;
+      err.existingRoomId = existing._id;
+      throw err;
+    }
+
+    // Giới hạn: không thể tạo phòng nếu đang tham gia phòng người khác
+    const memberships = await this.roomMemberRepository.findByUser(ownerId);
+    for (const m of memberships) {
+      const rm = m.roomId;
+      if (rm && rm.status && rm.status !== 'FINISHED') {
+        const roomOwner = await this.userRepository.findById(rm.ownerId);
+        const ownerName = roomOwner?.username || 'người khác';
+        const err = new Error(`Bạn đang tham gia phòng của "${ownerName}". Cần rời phòng trước khi tạo phòng mới.`);
+        err.statusCode = 409;
+        err.existingRoomId = rm._id;
+        throw err;
+      }
+    }
+
+    // Chatroom (game='chatroom') là persistent group chat, không auto-close, ≤30 members
+    const isChat = (roomData.game || 'lol') === 'chatroom';
     const room = await this.roomRepository.create({
       ...roomData,
+      game: roomData.game || 'lol',
+      slots: Math.min(isChat ? 30 : 16, roomData.slots || (isChat ? 30 : 4)),
+      isPersistent: isChat,
       ownerId,
       current: 1,
       status: 'RECRUITING'
@@ -35,9 +63,9 @@ class RoomService {
       userId: ownerId
     });
 
-    // Emit to all clients in the mode lobby channel
-    this.emit(`lobby:${room.mode}`, 'room:created', room);
-    // [REDIS_PLACEHOLDER] - In Phase C, this goes through Redis adapter automatically
+    // Emit to game-scoped mode lobby channel
+    const channel = `lobby:${room.game}:${room.mode}`;
+    this.emit(channel, 'room:created', room);
 
     return room;
   }
@@ -53,13 +81,31 @@ class RoomService {
       throw new Error('User not found');
     }
 
-    if (room.status !== 'RECRUITING') {
+    // Persistent chatroom luôn cho join lại (kể cả FULL status check bỏ qua nếu is_persistent + chưa đầy)
+    if (!room.isPersistent && room.status !== 'RECRUITING') {
       throw new Error('Room is not recruiting');
     }
 
     const existingMember = await this.roomMemberRepository.findByRoomAndUser(roomId, userId);
     if (existingMember) {
-      throw new Error('User already in this room');
+      // Already a member — let them back in without error
+      return { success: true, room };
+    }
+
+    // Persistent chatroom: require owner approval — push to pendingMembers then return
+    if (room.isPersistent) {
+      const ownerIdStr = room.ownerId?._id ? room.ownerId._id.toString() : room.ownerId.toString();
+      if (userId.toString() !== ownerIdStr) {
+        const pending = (room.pendingMembers || []).map(String);
+        if (!pending.includes(userId.toString())) {
+          await this.roomRepository.updateById(roomId, { $addToSet: { pendingMembers: userId } });
+        }
+        this.emit(`room:${roomId}`, 'room:join-requested', {
+          roomId,
+          user: { id: user._id, username: user.username, avatar: user.avatar },
+        });
+        return { success: true, pending: true, room };
+      }
     }
 
     if (room.current >= room.slots) {
@@ -78,9 +124,17 @@ class RoomService {
     }
 
     const member = await this.roomMemberRepository.findByRoomAndUser(roomId, userId);
-    this.emit(`room:${roomId}`, 'room:member-joined', { roomId, member });
-    this.emit(`lobby:${updatedRoom.mode}`, 'room:updated', updatedRoom);
-    // [REDIS_PLACEHOLDER] - In Phase C, Redis adapter ensures all server instances emit
+    // Emit member info with username for real-time UI update
+    this.emit(`room:${roomId}`, 'room:member-joined', {
+      roomId,
+      member: {
+        id: user._id,
+        userId: user._id,
+        name: user.username,
+        joinedAt: member?.joinedAt
+      }
+    });
+    this.emit(`lobby:${updatedRoom.game || 'lol'}:${updatedRoom.mode}`, 'room:updated', updatedRoom);
 
     return { success: true, room: updatedRoom };
   }
@@ -93,7 +147,8 @@ class RoomService {
 
     const member = await this.roomMemberRepository.findByRoomAndUser(roomId, userId);
     if (!member) {
-      throw new Error('User is not in this room');
+      // Already left — no error, just return current room state
+      return { success: true, room };
     }
 
     await this.roomMemberRepository.deleteByRoomAndUser(roomId, userId);
@@ -103,8 +158,8 @@ class RoomService {
       await this.roomRepository.setStatus(roomId, 'RECRUITING');
     }
 
-    this.emit(`room:${roomId}`, 'room:member-left', { roomId, userId });
-    this.emit(`lobby:${updatedRoom.mode}`, 'room:updated', updatedRoom);
+    this.emit(`room:${roomId}`, 'room:member-left', { roomId, userId: userId.toString() });
+    this.emit(`lobby:${updatedRoom.game || 'lol'}:${updatedRoom.mode}`, 'room:updated', updatedRoom);
 
     return { success: true, room: updatedRoom };
   }
@@ -123,9 +178,29 @@ class RoomService {
       throw new Error('Only room owner can kick members');
     }
 
+    // Notify the kicked user BEFORE leaveRoom (so they're still in the channel)
+    this.emit(`room:${roomId}`, 'room:kicked', { roomId, userId: targetUserId.toString(), reason: 'kicked_by_owner' });
+
     await this.leaveRoom(roomId, targetUserId);
 
     return { success: true };
+  }
+
+  async getMyActiveRoom(userId) {
+    // Check if user owns a room
+    const owned = await this.roomRepository.findActiveByOwner(userId);
+    if (owned) return { ...owned.toObject(), _isOwner: true };
+
+    // Check if user is a member of any active room
+    const memberships = await this.roomMemberRepository.findByUser(userId);
+    for (const m of memberships) {
+      const rm = m.roomId;
+      if (rm && rm.status && rm.status !== 'FINISHED') {
+        const roomOwner = await this.userRepository.findById(rm.ownerId);
+        return { ...rm.toObject(), _isOwner: false, _ownerName: roomOwner?.username || '' };
+      }
+    }
+    return null;
   }
 
   async listRooms(filters = {}) {
@@ -161,7 +236,8 @@ class RoomService {
     }
 
     const updatedRoom = await this.roomRepository.updateById(roomId, updateData);
-    this.emit(`lobby:${updatedRoom.mode}`, 'room:updated', updatedRoom);
+    this.emit(`lobby:${updatedRoom.game || 'lol'}:${updatedRoom.mode}`, 'room:updated', updatedRoom);
+    this.emit(`room:${roomId}`, 'room:updated', updatedRoom);
     return updatedRoom;
   }
 
@@ -179,11 +255,92 @@ class RoomService {
       throw new Error('Only room owner can delete room');
     }
 
+    // Emit to room members FIRST (before deletion, while socket channel is still relevant)
+    this.emit(`room:${roomId}`, 'room:deleted', { roomId });
+
     await this.roomMemberRepository.deleteByRoom(roomId);
     await this.roomRepository.deleteById(roomId);
 
-    this.emit(`lobby:${room.mode}`, 'room:deleted', { roomId });
+    const channel = `lobby:${room.game || 'lol'}:${room.mode}`;
+    this.emit(channel, 'room:deleted', { roomId });
 
+    return { success: true };
+  }
+
+  // Called when owner disconnects and grace period expires.
+  // Transfers to earliest joined member; if none, deletes room.
+  async handleOwnerAbandoned(roomId) {
+    const room = await this.roomRepository.findById(roomId);
+    if (!room) return { action: 'none' };
+
+    const ownerIdStr = room.ownerId?._id
+      ? room.ownerId._id.toString()
+      : room.ownerId.toString();
+
+    const members = await this.roomMemberRepository.findByRoom(roomId);
+    // Pick earliest joined member who is NOT the current owner
+    const next = members.find(m => {
+      const uid = m.userId?._id ? m.userId._id.toString() : m.userId?.toString();
+      return uid && uid !== ownerIdStr;
+    });
+
+    if (next) {
+      const newOwnerId = next.userId?._id ? next.userId._id : next.userId;
+      const updated = await this.roomRepository.updateById(roomId, { ownerId: newOwnerId });
+      this.emit(`room:${roomId}`, 'room:ownership-transferred', {
+        roomId,
+        newOwnerId: newOwnerId.toString(),
+        newOwnerName: next.userId?.username || ''
+      });
+      this.emit(`lobby:${room.game || 'lol'}:${room.mode}`, 'room:updated', updated);
+      return { action: 'transferred', newOwnerId: newOwnerId.toString() };
+    }
+
+    // Persistent chatroom: keep room alive for history, do not delete even if no members online
+    if (room.isPersistent) {
+      return { action: 'kept-persistent' };
+    }
+
+    // No members left — delete the room
+    await this.roomMemberRepository.deleteByRoom(roomId);
+    await this.roomRepository.deleteById(roomId);
+    this.emit(`room:${roomId}`, 'room:deleted', { roomId });
+    this.emit(`lobby:${room.game || 'lol'}:${room.mode}`, 'room:deleted', { roomId });
+    return { action: 'deleted' };
+  }
+
+  async approveJoin(roomId, ownerId, targetUserId) {
+    const room = await this.roomRepository.findById(roomId);
+    if (!room) throw new Error('Room not found');
+    const ownerIdStr = room.ownerId?._id ? room.ownerId._id.toString() : room.ownerId.toString();
+    if (ownerIdStr !== ownerId.toString()) throw new Error('Only owner can approve');
+
+    const pending = (room.pendingMembers || []).map(String);
+    if (!pending.includes(targetUserId.toString())) throw new Error('User did not request to join');
+    if (room.current >= room.slots) throw new Error('Room is full');
+
+    await this.roomRepository.updateById(roomId, { $pull: { pendingMembers: targetUserId } });
+    await this.roomMemberRepository.create({ roomId, userId: targetUserId });
+    const updatedRoom = await this.roomRepository.incrementCurrent(roomId);
+
+    const targetUser = await this.userRepository.findById(targetUserId);
+    const member = await this.roomMemberRepository.findByRoomAndUser(roomId, targetUserId);
+    this.emit(`room:${roomId}`, 'room:member-joined', {
+      roomId,
+      member: { id: targetUser._id, userId: targetUser._id, name: targetUser.username, joinedAt: member?.joinedAt },
+    });
+    this.emit(`room:${roomId}`, 'room:join-approved', { roomId, userId: targetUserId.toString() });
+    this.emit(`lobby:${updatedRoom.game || 'lol'}:${updatedRoom.mode}`, 'room:updated', updatedRoom);
+    return { success: true, room: updatedRoom };
+  }
+
+  async rejectJoin(roomId, ownerId, targetUserId) {
+    const room = await this.roomRepository.findById(roomId);
+    if (!room) throw new Error('Room not found');
+    const ownerIdStr = room.ownerId?._id ? room.ownerId._id.toString() : room.ownerId.toString();
+    if (ownerIdStr !== ownerId.toString()) throw new Error('Only owner can reject');
+    await this.roomRepository.updateById(roomId, { $pull: { pendingMembers: targetUserId } });
+    this.emit(`room:${roomId}`, 'room:join-rejected', { roomId, userId: targetUserId.toString() });
     return { success: true };
   }
 

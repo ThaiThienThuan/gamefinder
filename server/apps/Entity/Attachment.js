@@ -30,6 +30,9 @@ const attachmentSchema = new mongoose.Schema(
     mimetype: {
       type: String
     },
+    publicId: {
+      type: String
+    },
     createdAt: {
       type: Date,
       default: Date.now

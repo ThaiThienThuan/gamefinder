@@ -1,12 +1,10 @@
 const mongoose = require('mongoose');
-const setting = require('../../Config/Setting.json');
 
 async function connectDatabase() {
   try {
-    await mongoose.connect(setting.mongo.uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    });
+    const uri = process.env.MONGO_URI;
+    if (!uri) throw new Error('MONGO_URI is not set');
+    await mongoose.connect(uri);
     console.log('✓ MongoDB connected successfully');
     return true;
   } catch (error) {

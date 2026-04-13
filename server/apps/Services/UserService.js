@@ -2,7 +2,9 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const UserRepository = require('../Repository/UserRepository');
 const generateGuestId = require('../../Util/generateGuestId');
-const setting = require('../../Config/Setting.json');
+
+const JWT_SECRET = () => process.env.JWT_SECRET;
+const JWT_EXPIRY = () => process.env.JWT_EXPIRY || '7d';
 
 class UserService {
   constructor() {
@@ -15,22 +17,24 @@ class UserService {
       throw new Error('Username already exists');
     }
 
-    const existingEmail = await this.userRepository.findByEmail(email);
-    if (existingEmail) {
-      throw new Error('Email already exists');
+    if (email) {
+      const existingEmail = await this.userRepository.findByEmail(email);
+      if (existingEmail) {
+        throw new Error('Email already exists');
+      }
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await this.userRepository.create({
       username,
-      email,
+      ...(email ? { email } : {}),
       password: hashedPassword
     });
 
     const token = jwt.sign(
       { userId: user._id },
-      setting.jwt.secret,
-      { expiresIn: setting.jwt.expiry }
+      JWT_SECRET(),
+      { expiresIn: JWT_EXPIRY() }
     );
 
     return {
@@ -44,21 +48,28 @@ class UserService {
     };
   }
 
-  async login(email, password) {
-    const user = await this.userRepository.findByEmail(email);
+  async login(username, password) {
+    const user = await this.userRepository.findByUsernameWithPassword(username);
     if (!user) {
-      throw new Error('User not found');
+      throw new Error('Tài khoản không tồn tại');
+    }
+    if (!user.password) {
+      throw new Error('Tài khoản này chưa đặt mật khẩu');
     }
 
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) {
-      throw new Error('Invalid password');
+      throw new Error('Sai mật khẩu');
+    }
+
+    if (user.banned) {
+      throw new Error('Tài khoản đã bị khóa');
     }
 
     const token = jwt.sign(
       { userId: user._id },
-      setting.jwt.secret,
-      { expiresIn: setting.jwt.expiry }
+      JWT_SECRET(),
+      { expiresIn: JWT_EXPIRY() }
     );
 
     return {
@@ -66,7 +77,9 @@ class UserService {
         id: user._id,
         username: user.username,
         email: user.email,
-        rank: user.rank
+        rank: user.rank,
+        role: user.role,
+        avatar: user.avatar
       },
       token
     };
@@ -116,7 +129,8 @@ class UserService {
       username: user.username,
       email: user.email,
       rank: user.rank,
-      avatar: user.avatar
+      avatar: user.avatar,
+      role: user.role
     };
   }
 
@@ -158,8 +172,8 @@ class UserService {
 
     const token = jwt.sign(
       { userId: updatedUser._id, guestId },
-      setting.jwt.secret,
-      { expiresIn: setting.jwt.expiry }
+      JWT_SECRET(),
+      { expiresIn: JWT_EXPIRY() }
     );
 
     return {

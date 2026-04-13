@@ -1,3 +1,5 @@
+/*  */require('dotenv').config();
+
 const http = require('http');
 const app = require('./app');
 const { connectDatabase } = require('./apps/Database/Database');
@@ -39,16 +41,19 @@ async function startServer() {
     });
 
     // Graceful shutdown on SIGTERM
-    process.on('SIGTERM', async () => {
-      console.log('⚠ SIGTERM received — closing mediasoup resources...');
-      const { cleanupRoom } = require('./mediasoup/router');
-      // In a real deployment, iterate all active rooms and cleanup
-      // For now, server will exit and OS cleans up resources
-      server.close(() => {
+    const shutdown = async (signal) => {
+      console.log(`⚠ ${signal} received — shutting down...`);
+      server.close(async () => {
+        try {
+          const mongoose = require('mongoose');
+          await mongoose.disconnect();
+        } catch (_) {}
         console.log('✓ Server closed gracefully');
         process.exit(0);
       });
-    });
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
   } catch (error) {
     console.error('✗ Failed to start server:', error.message);
     process.exit(1);

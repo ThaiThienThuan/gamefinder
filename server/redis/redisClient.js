@@ -1,29 +1,20 @@
 const Redis = require('ioredis');
-const setting = require('../Config/Setting.json');
+
+// Upstash dùng rediss:// (TLS) — ioredis xử lý tự động khi URL có rediss://
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+
+const ioredisOptions = {
+  retryStrategy: (times) => Math.min(times * 50, 2000),
+  maxRetriesPerRequest: 3,
+  enableOfflineQueue: false
+};
 
 // Separate pub/sub clients for Socket.io Redis adapter
-const redisPub = new Redis({
-  host: process.env.REDIS_HOST || setting.redis.host,
-  port: process.env.REDIS_PORT || setting.redis.port,
-  password: process.env.REDIS_PASSWORD || setting.redis.password || undefined,
-  retryStrategy: (times) => {
-    const delay = Math.min(times * 50, 2000);
-    return delay;
-  }
-});
-
-const redisSub = redisPub.duplicate();
+const redisPub = new Redis(REDIS_URL, ioredisOptions);
+const redisSub = new Redis(REDIS_URL, ioredisOptions);
 
 // Main client for direct operations (presence, rate limiting, queue)
-const redis = new Redis({
-  host: process.env.REDIS_HOST || setting.redis.host,
-  port: process.env.REDIS_PORT || setting.redis.port,
-  password: process.env.REDIS_PASSWORD || setting.redis.password || undefined,
-  retryStrategy: (times) => {
-    const delay = Math.min(times * 50, 2000);
-    return delay;
-  }
-});
+const redis = new Redis(REDIS_URL, ioredisOptions);
 
 redisPub.on('connect', () => console.log('✓ Redis pub client connected'));
 redisPub.on('error', (err) => console.error('✗ Redis pub error:', err.message));
